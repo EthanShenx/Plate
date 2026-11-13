@@ -17,7 +17,7 @@ from .model import Project, SCRIPT_EXTENSIONS, project_from_dict, presets
 from .export import FORMATS, compose_pdf, rasterize
 from .interpreters import discovery, interpreter, probe
 from .render import render_script, signature
-from .style import TOKENS
+from .style import BUILTINS, ENUMS, TOKENS, resolve, validate_style
 
 WEB = Path(__file__).parent / "web"
 WORKSPACES = Path.home() / "Library/Application Support/Plate/workspaces"
@@ -59,6 +59,8 @@ class Session:
             "bundle": str(self.bundle or ""),
             "workspace": str(self.workspace),
             "style_tokens": TOKENS,
+            "style_options": ENUMS,
+            "palettes": BUILTINS,
             "renders": {panel.id: self.render_state(panel, geometry["rects"][panel.id])
                         for panel in self.project.panels},
         }
@@ -96,6 +98,7 @@ class Session:
         if project.id != self.project.id:
             raise ValueError("This project is no longer open.")
         Layout(project)
+        validate_style(project)
         write_workspace(project, self.workspace)
         self.project = project
         return self.state()
@@ -124,6 +127,10 @@ class Session:
         return {"path": str(path.resolve())}
 
     def action(self, endpoint, data):
+        if endpoint == "/api/style-json":
+            result = resolve(self.project)
+            result["size_mm"] = [self.project.size.width_mm, self.project.size.height_mm]
+            return result
         if endpoint == "/api/export":
             return self.export(data)
         if endpoint == "/api/refresh":

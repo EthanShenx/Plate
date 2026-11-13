@@ -48,7 +48,7 @@ async function commit(path, body, remember = true) {
 
 function change(mutate) {
   const project = structuredClone(state.project);
-  mutate(project);
+  try { mutate(project); } catch (error) { report(error.message); return Promise.resolve(false); }
   return commit("/api/project", project);
 }
 
@@ -255,6 +255,7 @@ function drawPanels() {
     row.className = "panel-row";
     const meta = document.createElement("small");
     meta.textContent = [panel.type === "script-r" ? "R" : "Python", render?.state].filter(Boolean).join(" · ");
+    if (Object.keys(panel.overrides).length) meta.textContent += " · styled locally";
     row.append(meta);
     row.classList.toggle("selected", panel.id === selected);
     row.draggable = true;
@@ -304,6 +305,204 @@ async function refresh(ids) {
   }
 }
 
+const styleGroups = {
+  "Typography": ["font_family", "font_main_pt", "font_min_pt", "axis_title_pt", "tick_label_pt",
+    "legend_title_pt", "legend_text_pt", "annotation_pt", "panel_label_pt", "panel_label_weight"],
+  "Lines and markers": ["line_data_pt", "line_axis_pt", "tick_length_pt", "tick_width_pt",
+    "tick_direction", "marker_size_pt"],
+  "Axes": ["spines", "grid", "background"],
+  "Spacing": ["margin_mm", "gutter_mm", "label_reserve_mm", "label_offset_x_mm", "label_offset_y_mm",
+    "collapse_empty_labels"],
+};
+const titles = {
+  font_main_pt: "Main font (pt)", font_min_pt: "Minimum font (pt)", line_data_pt: "Data stroke (pt)",
+  line_axis_pt: "Axis stroke (pt)", label_reserve_mm: "Label reservation (mm)",
+  label_offset_x_mm: "Label left offset (mm)", label_offset_y_mm: "Label top offset (mm)",
+};
+
+function titleFor(key) {
+  const label = titles[key] || key.replace(/_(pt|mm)$/, " ($1)").replaceAll("_", " ");
+  return label[0].toUpperCase() + label.slice(1);
+}
+
+function section(title, children, open = false) {
+  const group = document.createElement("details");
+  group.open = open;
+  const summary = document.createElement("summary");
+  summary.textContent = title;
+  group.append(summary, ...children);
+  return group;
+}
+
+function selectField(caption, values, current, onChange) {
+  const select = document.createElement("select");
+  for (const [value, name] of values) select.add(new Option(name, value));
+  select.value = current ?? "";
+  select.onchange = () => onChange(select.value);
+  return field(caption, select);
+}
+
+function checkField(caption, value, onChange) {
+  const control = document.createElement("input");
+  Object.assign(control, { type: "checkbox", checked: Boolean(value) });
+  control.onchange = () => onChange(control.checked);
+  return field(caption, control);
+}
+
+function styleField(key, value, update) {
+  const fallback = state.style_tokens[key];
+  const caption = titleFor(key);
+  const options = state.style_options[key];
+  if (options) return selectField(caption, options.map(option => [option, option]), value ?? fallback, update);
+  if (typeof fallback === "boolean") return checkField(caption, value ?? fallback, update);
+  if (key === "font_family") return stringField(caption, value ?? fallback, update);
+  const control = document.createElement("input");
+  Object.assign(control, { type: "number", step: "any", value: value ?? fallback ?? "",
+    min: key.startsWith("label_offset_") ? -100 : 0 });
+  if (fallback === null) control.placeholder = "Derived from main and minimum";
+  control.onchange = () => {
+    if (!control.value && fallback === null) update(null);
+    else if (control.validity.valid && Number.isFinite(control.valueAsNumber)) update(control.valueAsNumber);
+  };
+  return field(caption, control);
+}
+
+function downloadJson(name, value) {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2) + "\n"], { type: "application/json" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function allPalettes() {
+  return { ...state.palettes, ...(state.project.palettes.custom || {}) };
+}
+
+function paletteChoices() {
+  return Object.entries(allPalettes()).map(([id, item]) => [id, item.name + (item.safe ? " · colourblind-safe" : "")]);
+}
+
+function drawPaletteInspector() {
+  const { palettes } = state.project;
+  const active = palettes.active || "okabe-ito";
+  const palette = allPalettes()[active];
+  const semantic = palettes.colors || {};
+  const edit = mutate => change(project => mutate(project.palettes));
+  const updatePalette = mutate => edit(record => mutate(record.custom[active]));
+  const items = [
+    selectField("Palette", paletteChoices(), active, value => edit(p => { p.active = value; })),
+  ];
+  const swatches = document.createElement("div");
+  swatches.className = "swatches";
+  for (const color of palette.colors) {
+    const sample = document.createElement("span");
+    sample.style.background = color;
+    sample.title = color;
+    swatches.append(sample);
+  }
+  items.push(swatches, button("Duplicate as custom palette", () => {
+    const name = prompt("Palette name", `${palette.name} copy`);
+    if (!name?.trim()) return;
+    edit(p => {
+      const id = `custom-${crypto.randomUUID()}`;
+      (p.custom ||= {})[id] = { name: name.trim(), safe: false, colors: [...palette.colors] };
+      p.active = id;
+    });
+  }));
+  if (palettes.custom?.[active]) {
+    items.push(stringField("Palette name", palette.name, value => updatePalette(p => { p.name = value.trim(); })));
+    for (const [index, color] of palette.colors.entries()) {
+      const row = document.createElement("div");
+      row.className = "inline-fields";
+      const move = delta => updatePalette(p => {
+        [p.colors[index], p.colors[index + delta]] = [p.colors[index + delta], p.colors[index]];
+      });
+      const up = button("↑", () => move(-1));
+      const down = button("↓", () => move(1));
+      up.disabled = index === 0;
+      down.disabled = index === palette.colors.length - 1;
+      const remove = button("Remove", () => updatePalette(p => p.colors.splice(index, 1)));
+      remove.disabled = palette.colors.length === 1;
+      row.append(stringField(`Colour ${index + 1}`, color, value => updatePalette(p => { p.colors[index] = value; })),
+        up, down, remove);
+      items.push(row);
+    }
+    items.push(button("Add colour", () => updatePalette(p => p.colors.push("#808080"))));
+  }
+  const importer = document.createElement("input");
+  importer.type = "file";
+  importer.accept = ".json,application/json";
+  importer.hidden = true;
+  importer.onchange = async () => {
+    try {
+      const raw = JSON.parse(await importer.files[0].text());
+      if (!Array.isArray(raw.colors) || typeof raw.name !== "string") throw new Error("Expected palette name and colours.");
+      await edit(p => {
+        const id = `custom-${crypto.randomUUID()}`;
+        (p.custom ||= {})[id] = { name: raw.name, colors: raw.colors, safe: raw.safe === true };
+        p.active = id;
+      });
+    } catch (error) { report(error.message); }
+  };
+  items.push(importer, button("Import palette", () => importer.click()),
+    button("Export palette", () => downloadJson("palette.json", palette)));
+  const heading = document.createElement("h3");
+  heading.textContent = "Semantic colours";
+  items.push(heading);
+  for (const [key, color] of Object.entries(semantic)) {
+    const row = document.createElement("div");
+    row.className = "inline-fields";
+    row.append(stringField("Group", key, value => edit(p => {
+      value = value.trim();
+      if (!value || (value !== key && value in p.colors)) throw new Error("Enter a unique group name.");
+      p.colors = Object.fromEntries(Object.entries(p.colors).map(([name, hex]) => [name === key ? value : name, hex]));
+    })), stringField("Hex", color, value => edit(p => { p.colors[key] = value; })),
+    button("Remove", () => edit(p => { delete p.colors[key]; })));
+    items.push(row);
+  }
+  items.push(button("Add group", () => {
+    const group = prompt("Semantic group name")?.trim();
+    if (!group || Object.hasOwn(semantic, group)) return;
+    edit(p => { p.colors = { ...p.colors, [group]: "#808080" }; });
+  }));
+  return section("Palette and semantic colours", items);
+}
+
+function drawOverrides(panel) {
+  const keys = Object.keys(panel.overrides).filter(key => key !== "opt_out");
+  const controls = [checkField("Use script’s own style", panel.overrides.opt_out,
+    value => editPanel(panel, p => {
+      if (value) p.overrides.opt_out = true;
+      else delete p.overrides.opt_out;
+    }))];
+  for (const key of keys) {
+    let input;
+    const set = value => editPanel(panel, p => { p.overrides[key] = value; });
+    if (key === "palette") input = selectField("Palette", paletteChoices(), panel.overrides.palette, set);
+    else if (key === "colors") input = stringField("Semantic map (JSON)", JSON.stringify(panel.overrides.colors), value => {
+      try { set(JSON.parse(value)); } catch (error) { report(error.message); }
+    });
+    else input = styleField(key, panel.overrides[key], set);
+    const row = document.createElement("div");
+    row.className = "inline-fields";
+    row.append(input, button("Reset", () => editPanel(panel, p => { delete p.overrides[key]; })));
+    controls.push(row);
+  }
+  const available = [...Object.keys(state.style_tokens), "palette", "colors"]
+    .filter(key => !Object.hasOwn(panel.overrides, key));
+  controls.push(selectField("Add override", [["", "Choose a style token"], ...available.map(key => [key, titleFor(key)])],
+    "", key => {
+      if (!key) return;
+      const value = key === "palette" ? state.project.palettes.active || "okabe-ito" :
+        key === "colors" ? {} : (state.project.style[key] ?? state.style_tokens[key]);
+      editPanel(panel, p => { p.overrides[key] = value; });
+    }));
+  return section(`Style overrides${keys.length ? ` (${keys.length})` : ""}`, controls,
+    keys.length > 0 || panel.overrides.opt_out);
+}
+
 function drawPanelInspector(panel) {
   const {x, y, w, h} = state.geometry.rects[panel.id];
   const dimensions = Object.entries({x, y, w, h}).map(([key, value]) =>
@@ -338,7 +537,7 @@ function drawPanelInspector(panel) {
           `${info.path} · ${info.version}\nRequired packages are available.`;
       } catch (error) { output.textContent = error.message; }
     }),
-    output, button("Delete panel", () => layout("delete")));
+    output, drawOverrides(panel), button("Delete panel", () => layout("delete")));
 }
 
 function draw() {
@@ -353,7 +552,18 @@ function draw() {
   drawCanvas();
   drawPanels();
   report(bundle || "Working copy · Save to create a .plate bundle");
-  if (panel) { drawPanelInspector(panel); return; }
+  const openGroups = new Set([...$("#settings").querySelectorAll("details[open] summary")]
+    .map(summary => summary.textContent));
+  const previousScope = $("#settings").dataset.scope;
+  const scope = panel?.id || "figure";
+  $("#settings").dataset.scope = scope;
+  const restoreGroups = () => {
+    if (previousScope !== scope) return;
+    for (const item of $("#settings").querySelectorAll("details")) {
+      item.open ||= openGroups.has(item.querySelector("summary").textContent);
+    }
+  };
+  if (panel) { drawPanelInspector(panel); restoreGroups(); return; }
   const preset = document.createElement("select");
   for (const journal of journals) {
     for (const width of journal.widths || [null]) {
@@ -371,15 +581,25 @@ function draw() {
   const height = document.createElement("input");
   Object.assign(height, { type: "number", min: "1", step: "0.1", value: project.size.height_mm });
   height.onchange = () => change(p => { if (height.validity.valid) p.size.height_mm = height.valueAsNumber; });
-  $("#settings").replaceChildren(field("Journal width", preset), field("Height (mm)", height));
-  $("#settings").append(numeric("Minimum panel size (mm)", project.size.minimum_mm,
-    value => change(p => { p.size.minimum_mm = value; }), 1),
+  const projectOptions = [
     stringField("Data root", project.data_root, value => change(p => { p.data_root = value; })),
     numeric("Render timeout (seconds)", project.timeout_s, value => change(p => { p.timeout_s = value; }), 1),
     ...["script-r", "script-py"].map(type =>
       stringField(type === "script-r" ? "Default Rscript" : "Default Python", project.interpreters[type] || "",
-        value => change(p => { p.interpreters[type] = value; }))));
-
+        value => change(p => { p.interpreters[type] = value; }))),
+    button("Export style JSON", async () => {
+      try { downloadJson("plate-style.json", await request("/api/style-json", {})); }
+      catch (error) { report(error.message); }
+    }),
+  ];
+  $("#settings").replaceChildren(
+    section("Figure size", [field("Journal width", preset), field("Height (mm)", height),
+      numeric("Minimum panel size (mm)", project.size.minimum_mm,
+        value => change(p => { p.size.minimum_mm = value; }), 1)], true),
+    ...Object.entries(styleGroups).map(([name, keys]) => section(name, keys.map(key =>
+      styleField(key, project.style[key], value => change(p => { p.style[key] = value; }))))),
+    drawPaletteInspector(), section("Runtime", projectOptions));
+  restoreGroups();
 }
 
 async function action(name, data = {}) {

@@ -50,3 +50,63 @@ def context_for(project, panel, rect):
     context = resolve(project, panel)
     box = content_box(rect, panel, context["style"])
     return {**context, "size_mm": [round(box["w"], 8), round(box["h"], 8)]}
+
+
+ENUMS = {
+    "panel_label_weight": ("normal", "bold"),
+    "tick_direction": ("in", "out"),
+    "spines": ("all", "left-bottom", "none"),
+    "grid": ("none", "major"),
+    "background": ("none", "white"),
+}
+
+
+def validate_style(project):
+    import re
+    from .layout import number
+
+    def color(value):
+        if not isinstance(value, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            raise ValueError("Colours must use six-digit hex, for example #0072B2.")
+
+    def semantic(values):
+        if not isinstance(values, dict):
+            raise ValueError("Semantic colours must be a map.")
+        for key, value in values.items():
+            if not key.strip():
+                raise ValueError("A semantic colour needs a nonempty name.")
+            color(value)
+
+    palettes = {**BUILTINS, **project.palettes.get("custom", {})}
+    for item in palettes.values():
+        if not item["name"].strip() or not item["colors"]:
+            raise ValueError("Each palette needs a name and at least one colour.")
+        for value in item["colors"]:
+            color(value)
+    if project.palettes.get("active", "okabe-ito") not in palettes:
+        raise ValueError("The selected palette is missing.")
+    semantic(project.palettes.get("colors", {}))
+    for values in [project.style, *(panel.overrides for panel in project.panels)]:
+        for key, value in values.items():
+            if key in ROLE_OFFSETS and value is None:
+                continue
+            if key == "font_family":
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError("Enter a font family.")
+            elif key in ENUMS:
+                if value not in ENUMS[key]:
+                    raise ValueError(f"Invalid value for {key}.")
+            elif key in {"collapse_empty_labels", "opt_out"}:
+                if not isinstance(value, bool):
+                    raise ValueError(f"{key} must be true or false.")
+            elif key == "palette":
+                if value not in palettes:
+                    raise ValueError("The override palette is missing.")
+            elif key == "colors":
+                semantic(value)
+            elif key in TOKENS:
+                low = 1 if key.startswith("font_") or key in ROLE_OFFSETS else 0
+                if key.startswith("label_offset_"):
+                    low = -100
+                number(value, key.replace("_", " "), low, 500)
+    number(project.timeout_s, "Render timeout", 1, 3600)
