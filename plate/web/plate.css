@@ -103,3 +103,7 @@ h3 { font-size: 12px; }
 .check-row.selected { border-color: var(--accent); }
 .highlights { position: absolute; inset: 0; pointer-events: none; }
 .highlights span { position: absolute; outline: 1px solid #b56621; background: #e1a46522; }
+.panel-label { position: absolute; line-height: 1.1; pointer-events: none; color: #111; }
+.tile:has(.plot-preview:not([hidden])) { background: white; border-color: transparent; }
+.tile:has(.plot-preview:not([hidden])) .render-badge { opacity: .95; }
+.asset-meta { overflow-wrap: anywhere; font-size: 11px; }

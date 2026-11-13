@@ -21,13 +21,16 @@ def panel_checks(panel, render, style):
 
     checks = []
     metadata = render.get("metadata", {})
-    for span in metadata.get("text", []):
+    label = render.get("label_metadata")
+    spans = metadata.get("text", []) + ([label] if label else [])
+    for span in spans:
         size = span["size"]
         if size < style["font_min_pt"] - 0.05:
             checks.append(check("font-size", f'{span["text"]} · {size:.2f} pt',
-                                bbox=span["bbox"], page_pt=metadata["page_pt"], size=size))
+                                bbox=span["bbox"], page_pt=span.get("page_pt", metadata.get("page_pt")),
+                                label=span is label, size=size))
     if not panel.overrides.get("opt_out"):
-        fonts = {span["font"] for span in metadata.get("text", [])}
+        fonts = {span["font"] for span in spans}
         for actual in sorted(fonts):
             if not font_matches(style["font_family"], actual):
                 checks.append(check("font-family", f'Expected {style["font_family"]}; rendered {actual}.'))

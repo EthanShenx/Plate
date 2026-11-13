@@ -28,7 +28,7 @@ PT_PER_MM = 72 / MM_PER_IN
 def resolve(project, panel=None):
     overrides = panel.overrides if panel else {}
     style = {**TOKENS, **project.style, **{key: value for key, value in overrides.items()
-                                            if key in TOKENS}}
+                                            if key in TOKENS and not key.startswith("label_offset_")}}
     for role, offset in ROLE_OFFSETS.items():
         if style[role] is None:
             style[role] = max(style["font_min_pt"], style["font_main_pt"] + offset)
@@ -86,6 +86,14 @@ def validate_style(project):
     if project.palettes.get("active", "okabe-ito") not in palettes:
         raise ValueError("The selected palette is missing.")
     semantic(project.palettes.get("colors", {}))
+    for panel in project.panels:
+        crop = panel.settings.get("crop")
+        if crop is not None:
+            if len(crop) != 4:
+                raise ValueError("Crop needs x, y, width and height.")
+            x, y, w, h = [number(value, "Crop fraction", 0, 1) for value in crop]
+            if min(w, h) <= 0 or max(x + w, y + h) > 1.00000001:
+                raise ValueError("Crop must fit within the source image and have positive dimensions.")
     for values in [project.style, *(panel.overrides for panel in project.panels)]:
         for key, value in values.items():
             if key in ROLE_OFFSETS and value is None:

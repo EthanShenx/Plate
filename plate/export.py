@@ -2,6 +2,7 @@
 
 from io import BytesIO
 import math
+import re
 
 from PIL import Image
 import pymupdf as pdf
@@ -24,6 +25,7 @@ def flatten_placement(document, page, content):
     resources = document.xref_get_key(content, "Resources")[1]
     document.xref_set_key(outer[0], "Resources", resources)
     document.update_stream(outer[0], document.xref_stream(content))
+    return outer[0]
 
 
 def placement(page, source, rect):
@@ -40,7 +42,10 @@ def placement(page, source, rect):
     dx, dy = (rect.width - crop_w) / 2, (rect.height - crop_h) / 2
     destination = pdf.Rect(rect.x0 + dx, rect.y0 + dy, rect.x1 - dx, rect.y1 - dy)
     content = page.show_pdf_page(destination, source, 0, clip=clip, keep_proportion=False)
-    flatten_placement(page.parent, page, content)
+    overflow = not clip.contains(full) or any(
+        not full.contains(pdf.Rect(entry[1])) for entry in source_page.get_bboxlog()
+    )
+    return flatten_placement(page.parent, page, content), overflow
 
 
 def empty_page(width, height):
@@ -57,7 +62,8 @@ def compose_pdf(width_mm, height_mm, panels):
     """Combine a sequence of (PDF path or bytes, rectangle in mm) entries."""
     with pdf.open() as document:
         page = document.new_page(width=width_mm * PT_PER_MM, height=height_mm * PT_PER_MM)
-        for path, box in panels:
+        for entry in panels:
+            path, box, *label_data = entry
             rect = pdf_rect(box)
             if path is None:
                 source = empty_page(rect.width, rect.height)
@@ -66,7 +72,12 @@ def compose_pdf(width_mm, height_mm, panels):
             else:
                 source = pdf.open(path)
             with source:
-                placement(page, source, rect)
+                form, overflow = placement(page, source, rect)
+            if label_data:
+                label, panel_box, style = label_data
+                if label:
+                    append_label(document, page, label, pdf_rect(panel_box), style, form, overflow)
+                    page = document[0]
         return document.tobytes(garbage=4, deflate=True)
 
 
@@ -88,3 +99,59 @@ def rasterize(data, width_mm, height_mm, format, dpi):
     options = {"compression": "tiff_lzw"} if format == "tiff" else {}
     result.save(output, format=format.upper(), dpi=(dpi, dpi), **options)
     return output.getvalue()
+
+
+def append_label(document, page, label, rect, style, form, overflow):
+    """Append a label within the panel form's resources and coordinate system."""
+    from .fonts import get_font
+
+    kind, value = document.xref_get_key(form, "Matrix")
+    a, _, _, d, e, f = [float(n) for n in value.strip("[]").split()] if kind == "array" else (1, 0, 0, 1, 0, 0)
+    font = get_font(style["font_family"], style["panel_label_weight"] == "bold")
+    size = style["panel_label_pt"]
+    offset_x = style["label_offset_x_mm"] * PT_PER_MM
+    offset_y = style["label_offset_y_mm"] * PT_PER_MM
+    top = page.rect.height - rect.y0
+    x = (rect.x0 + offset_x - e) / a
+    y = (top - offset_y - font.ascender * size - f) / d
+
+    # Keep existing overflow clipping when expanding the form to include the label.
+    _, bbox = document.xref_get_key(form, "BBox")
+    stream = document.xref_stream(form)
+    x0, y0, x1, y1 = [float(n) for n in bbox.strip("[]").split()]
+    clip = f"q {x0:.8f} {y0:.8f} {x1-x0:.8f} {y1-y0:.8f} re W n\n".encode()
+    bounds = [(rect.x0-e)/a, (page.rect.height-rect.y1-f)/d, (rect.x1-e)/a, (top-f)/d]
+    if overflow and min(bounds[0]-x0, bounds[1]-y0, x1-bounds[2], y1-bounds[3]) < -.001:
+        stream = clip + stream + b"\nQ"
+    document.xref_set_key(form, "BBox", "[" + " ".join(f"{v:.8f}" for v in bounds) + "]")
+
+    with pdf.open() as scratch:
+        label_page = scratch.new_page(width=rect.width, height=rect.height)
+        writer = pdf.TextWriter(label_page.rect)
+        writer.append((0, size), label, font=font, fontsize=size)
+        writer.write_text(label_page)
+        scratch.subset_fonts()
+        # Graft the embedded font via a temporary page, then share its reference.
+        document.insert_pdf(scratch)
+        graft = document[-1]
+        source_fonts = graft.get_fonts()
+        label_stream = graft.read_contents()
+        document.delete_page(-1)
+
+    resources_kind, resources = document.xref_get_key(form, "Resources")
+    resource_ref = document.get_new_xref()
+    resource_object = document.xref_object(int(resources.split()[0])) if resources_kind == "xref" else resources
+    document.update_object(resource_ref, resource_object if resource_object.startswith("<<") else "<<>>")
+    document.xref_set_key(form, "Resources", f"{resource_ref} 0 R")
+    font_kind, fonts = document.xref_get_key(resource_ref, "Font")
+    font_ref = document.get_new_xref()
+    font_object = document.xref_object(int(fonts.split()[0])) if font_kind == "xref" else fonts
+    document.update_object(font_ref, font_object if font_object.startswith("<<") else "<<>>")
+    document.xref_set_key(resource_ref, "Font", f"{font_ref} 0 R")
+    for index, entry in enumerate(source_fonts):
+        resource = f"PlateLabel{index}"
+        document.xref_set_key(font_ref, resource, f"{entry[0]} 0 R")
+        label_stream = re.sub(rb"/" + re.escape(entry[4].encode()) + rb"(?=\s)", f"/{resource}".encode(), label_stream)
+    height = rect.height
+    transform = f"q {1/a:.8f} 0 0 {1/d:.8f} {x:.8f} {y-(height-size)/d:.8f} cm\n".encode()
+    document.update_stream(form, b"q\n" + stream + b"\nQ\n" + transform + label_stream + b"\nQ\n")

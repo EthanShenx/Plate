@@ -9,6 +9,8 @@ let busy = false;
 let showChecks = false;
 let dragged = null;
 const panels = new Map();
+const typeNames = {"script-py": "Python", "script-r": "R", image: "Image", vector: "Vector", text: "Text", legend: "Legend"};
+const isScript = panel => panel.type.startsWith("script-");
 const edgeNames = ["left", "right", "top", "bottom"];
 
 async function request(path, body) {
@@ -208,7 +210,9 @@ function drawCanvas() {
       badge.className = "render-badge";
       const highlights = document.createElement("div");
       highlights.className = "highlights";
-      tile.append(caption, preview, highlights, badge);
+      const label = document.createElement("span");
+      label.className = "panel-label";
+      tile.append(caption, preview, highlights, label, badge);
       for (const edge of [...edgeNames, "center"]) dropZone(tile, edge, panel.id);
       tile.onclick = () => selectPanel(panel.id);
       tile.onkeydown = event => {
@@ -226,6 +230,19 @@ function drawCanvas() {
     const src = render?.key ? `/preview/${render.key}` : "";
     if (src && image.getAttribute("src") !== src) image.src = src;
     image.hidden = !src;
+    const rect = geometry.rects[panel.id];
+    const content = render?.box || rect;
+    const contentTop = (content.y - rect.y) / rect.h * 100;
+    image.style.top = `${contentTop}%`;
+    image.style.height = `${100 - contentTop}%`;
+    const label = tile.querySelector(".panel-label");
+    label.textContent = panel.label;
+    const style = render.style;
+    Object.assign(label.style, {
+      top: `${style.label_offset_y_mm * zoom}px`, left: `${style.label_offset_x_mm * zoom}px`,
+      fontFamily: style.font_family, fontWeight: style.panel_label_weight,
+      fontSize: `${style.panel_label_pt * 25.4 / 72 * zoom}px`,
+    });
     tile.querySelector(".tile-caption").hidden = !!src;
     const badge = tile.querySelector(".render-badge");
     badge.textContent = render?.state || "";
@@ -235,8 +252,8 @@ function drawCanvas() {
         const node = document.createElement("span");
         const [x0, y0, x1, y1] = check.bbox;
         const [w, h] = check.page_pt;
-        Object.assign(node.style, { left: `${x0 / w * 100}%`, top: `${y0 / h * 100}%`,
-          width: `${(x1 - x0) / w * 100}%`, height: `${(y1 - y0) / h * 100}%` });
+        Object.assign(node.style, { left: `${x0 / w * 100}%`, top: `${(check.label ? 0 : contentTop) + y0 / h * (check.label ? 100 : 100 - contentTop)}%`,
+          width: `${(x1 - x0) / w * 100}%`, height: `${(y1 - y0) / h * (check.label ? 100 : 100 - contentTop)}%` });
         return node;
       });
     tile.querySelector(".highlights").replaceChildren(...highlights);
@@ -267,7 +284,8 @@ function drawPanels() {
     const row = button(panel.name, () => selectPanel(panel.id));
     row.className = "panel-row";
     const meta = document.createElement("small");
-    meta.textContent = [panel.type === "script-r" ? "R" : "Python", render?.state].filter(Boolean).join(" · ");
+    meta.textContent = [typeNames[panel.type], panel.label, render?.state].filter(Boolean).join(" · ");
+    if (panel.type === "vector") meta.textContent += " · original style";
     if (Object.keys(panel.overrides).length) meta.textContent += " · styled locally";
     row.append(meta);
     row.classList.toggle("selected", panel.id === selected);
@@ -504,7 +522,7 @@ function drawOverrides(panel) {
     controls.push(row);
   }
   const available = [...Object.keys(state.style_tokens), "palette", "colors"]
-    .filter(key => !Object.hasOwn(panel.overrides, key));
+    .filter(key => !key.startsWith("label_offset_") && !Object.hasOwn(panel.overrides, key));
   controls.push(selectField("Add override", [["", "Choose a style token"], ...available.map(key => [key, titleFor(key)])],
     "", key => {
       if (!key) return;
@@ -514,6 +532,45 @@ function drawOverrides(panel) {
     }));
   return section(`Style overrides${keys.length ? ` (${keys.length})` : ""}`, controls,
     keys.length > 0 || panel.overrides.opt_out);
+}
+
+function nativeInspector(panel) {
+  const settings = panel.settings;
+  const render = state.renders[panel.id];
+  const update = (key, value) => editPanel(panel, p => { p.settings[key] = value; });
+  const options = (caption, key, values, fallback) => selectField(caption,
+    values.map(value => [value, titleFor(value)]), settings[key] || fallback, value => update(key, value));
+  if (panel.type === "text") {
+    const text = document.createElement("textarea");
+    text.value = settings.text || "";
+    text.rows = 6;
+    text.onchange = () => update("text", text.value);
+    return [field("Text", text), options("Alignment", "align", ["left", "center", "right"], "left"),
+      options("Text role", "role", ["main", "annotation"], "main")];
+  }
+  if (panel.type === "legend") {
+    const keys = Object.keys({ ...state.project.palettes.colors, ...panel.overrides.colors });
+    const selectedKeys = settings.keys || keys;
+    return [options("Direction", "direction", ["vertical", "horizontal"], "vertical"),
+      options("Swatch", "swatch", ["patch", "line", "point"], "patch"),
+      section("Semantic groups", keys.map(key => checkField(key, selectedKeys.includes(key), include =>
+        update("keys", keys.filter(item => item === key ? include : selectedKeys.includes(item))))), true)];
+  }
+  const asset = document.createElement("p");
+  asset.className = "asset-meta";
+  const dpi = render.metadata?.effective_dpi?.[0];
+  asset.textContent = [settings.filename || "No asset imported", dpi ? `${Math.round(dpi)} effective dpi` : "",
+    panel.type === "vector" ? "Original vector style" : "", render.error].filter(Boolean).join(" · ");
+  const controls = [asset, button("Import file", () => {
+    const path = prompt(panel.type === "vector" ? "Path to a PDF or SVG" : "Path to an image");
+    if (path) commit("/api/asset", { panel: panel.id, path });
+  })];
+  if (panel.type === "image") {
+    controls.push(options("Fit", "fit", ["contain", "cover"], "contain"),
+      stringField("Crop x, y, w, h (0–1)", (settings.crop || [0, 0, 1, 1]).join(", "), value =>
+        update("crop", value.split(",").map(part => Number(part.trim())))));
+  }
+  return controls;
 }
 
 function drawPanelInspector(panel) {
@@ -527,6 +584,16 @@ function drawPanelInspector(panel) {
     box.onchange = () => layout("lock", { field: key, enabled: box.checked });
     return field(key === "w" ? "Lock width" : "Lock height", box);
   });
+  const basics = [
+    stringField("Panel name", panel.name, value => editPanel(panel, p => { p.name = value.trim() || p.name; })),
+    stringField("Manual label", panel.label, value => editPanel(panel, p => { p.label = value; })),
+    section("Geometry", [...dimensions, ...locks], true),
+  ];
+  if (!isScript(panel)) {
+    $("#settings").replaceChildren(...basics, ...nativeInspector(panel), drawOverrides(panel),
+      button("Delete panel", () => layout("delete")));
+    return;
+  }
   const script = document.createElement("textarea");
   script.rows = 9;
   script.value = panel.script;
@@ -536,7 +603,7 @@ function drawPanelInspector(panel) {
   output.className = "console";
   output.textContent = [render.error, render.stdout, render.stderr, ...(render.warnings || [])]
     .filter(Boolean).join("\n");
-  $("#settings").replaceChildren(...dimensions, ...locks,
+  $("#settings").replaceChildren(...basics,
     stringField("Interpreter override", panel.interpreter, value => editPanel(panel, p => { p.interpreter = value; })),
     field("Plot script", script),
     button("Refresh panel", async () => {
@@ -655,7 +722,7 @@ async function action(name, data = {}) {
 
 $("#add").onclick = async () => {
   const type = $("#panel-type").value;
-  const name = `${type === "script-r" ? "R" : "Python"} panel`;
+  const name = `${typeNames[type]} panel`;
   if (await layout("add", { type, name })) selectPanel(state.project.panels.at(-1).id);
 };
 $("#frame").onclick = event => { if (event.target === $("#frame")) selectPanel(null); };

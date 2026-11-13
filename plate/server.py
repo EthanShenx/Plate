@@ -1,6 +1,7 @@
 """Local HTTP interface and project session."""
 
 from dataclasses import asdict
+from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
@@ -16,9 +17,11 @@ from .checks import project_checks
 from .layout import Layout, apply
 from .model import Project, SCRIPT_EXTENSIONS, project_from_dict, presets
 from .export import FORMATS, compose_pdf, rasterize
+from .native import native_signature, render_native
+from .fonts import get_font
 from .interpreters import discovery, interpreter, probe
 from .render import render_script, signature
-from .style import BUILTINS, ENUMS, TOKENS, resolve, validate_style
+from .style import BUILTINS, ENUMS, PT_PER_MM, TOKENS, content_box, resolve, validate_style
 
 WEB = Path(__file__).parent / "web"
 WORKSPACES = Path.home() / "Library/Application Support/Plate/workspaces"
@@ -42,20 +45,49 @@ class Session:
 
     def render_state(self, panel, rect):
         previous = self.renders.get(panel.id, {})
-        if panel.type not in SCRIPT_EXTENSIONS:
-            return {}
-        try:
-            fresh = previous.get("signature") == signature(self.project, panel, rect)
-        except ValueError:
-            fresh = False
-        if fresh or not previous or previous.get("invalid_box") and not self.valid_box(panel, rect):
+        current = self.panel_signature(panel, rect)
+        if previous.get("signature") == current or not previous:
             return {"state": "stale", **previous}
         return {**previous, "state": "stale"}
+
+    def panel_signature(self, panel, rect):
+        try:
+            if panel.type in SCRIPT_EXTENSIONS:
+                return signature(self.project, panel, rect)
+            return native_signature(self.project, panel, rect)
+        except ValueError:
+            return None
+
+    def render_native_panels(self, geometry):
+        for panel in self.project.panels:
+            if panel.type not in SCRIPT_EXTENSIONS and self.render_state(panel, geometry[panel.id])["state"] == "stale":
+                self.refresh_panel(panel, geometry[panel.id])
 
     def state(self):
         geometry = Layout(self.project).view()
         renders = {panel.id: self.render_state(panel, geometry["rects"][panel.id])
                    for panel in self.project.panels}
+        for panel in self.project.panels:
+            render = renders[panel.id]
+            rect = geometry["rects"][panel.id]
+            style = resolve(self.project, panel)["style"]
+            try:
+                render["box"] = content_box(rect, panel, style)
+            except ValueError:
+                render["box"] = rect
+            if panel.label:
+                font = get_font(style["font_family"], style["panel_label_weight"] == "bold")
+                render["label_metadata"] = {
+                    "text": panel.label, "font": font.name, "size": style["panel_label_pt"],
+                    "page_pt": [rect["w"] * PT_PER_MM, rect["h"] * PT_PER_MM],
+                }
+                x, y = (style[f"label_offset_{axis}_mm"] * PT_PER_MM for axis in ("x", "y"))
+                render["label_metadata"]["bbox"] = [
+                    x, y, x + font.text_length(panel.label, fontsize=style["panel_label_pt"]),
+                    y + (font.ascender-font.descender) * style["panel_label_pt"],
+                ]
+            render["style"] = {key: style[key] for key in ("font_family", "panel_label_pt",
+                                "panel_label_weight", "label_offset_x_mm", "label_offset_y_mm")}
         return {
             "project": asdict(self.project),
             "geometry": geometry,
@@ -71,30 +103,25 @@ class Session:
     def refresh(self, panel_ids):
         geometry = Layout(self.project).rects
         for panel in self.project.panels:
-            if panel.id not in panel_ids or panel.type not in SCRIPT_EXTENSIONS:
-                continue
-            rect = geometry[panel.id]
-            try:
-                self.renders[panel.id] = render_script(
-                    self.project, panel, rect, self.workspace, self.bundle)
-            except (ValueError, OSError, subprocess.SubprocessError) as error:
-                logging.getLogger("plate").info("Render failed for %s: %s", panel.id, error)
-                valid_box = self.valid_box(panel, rect)
-                self.renders[panel.id] = {
-                    **self.renders.get(panel.id, {}), "state": "error",
-                    "invalid_box": not valid_box,
-                    "signature": signature(self.project, panel, rect) if valid_box else None,
-                    "error": str(error), "stdout": getattr(error, "stdout", ""),
-                    "stderr": getattr(error, "stderr", ""),
-                }
+            if panel.id in panel_ids:
+                self.refresh_panel(panel, geometry[panel.id])
         write_json(self.workspace / "cache/index.json", self.renders)
 
-    def valid_box(self, panel, rect):
+    def refresh_panel(self, panel, rect):
         try:
-            signature(self.project, panel, rect)
-        except ValueError:
-            return False
-        return True
+            if panel.type in SCRIPT_EXTENSIONS:
+                result = render_script(self.project, panel, rect, self.workspace, self.bundle)
+            else:
+                result = render_native(self.project, panel, rect, self.workspace)
+            self.renders[panel.id] = result
+        except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as error:
+            logging.getLogger("plate").info("Render failed for %s: %s", panel.id, error)
+            self.renders[panel.id] = {
+                **self.renders.get(panel.id, {}), "state": "error",
+                "signature": self.panel_signature(panel, rect),
+                "error": str(error), "stdout": getattr(error, "stdout", ""),
+                "stderr": getattr(error, "stderr", ""),
+            }
 
     def update(self, data):
         project = project_from_dict(data)
@@ -104,6 +131,7 @@ class Session:
         validate_style(project)
         write_workspace(project, self.workspace)
         self.project = project
+        self.render_native_panels(Layout(project).rects)
         return self.state()
 
     def export(self, data):
@@ -114,6 +142,7 @@ class Session:
         if self.bundle and path.resolve() == self.bundle:
             raise ValueError("Choose a separate destination for the export.")
         rects = Layout(self.project).rects
+        self.render_native_panels(rects)
         panels = []
         for panel in self.project.panels:
             previous = self.render_state(panel, rects[panel.id])
@@ -121,7 +150,13 @@ class Session:
             source = self.workspace / "cache" / f"{key}.pdf" if key else None
             if source and not source.is_file():
                 source = None
-            panels.append((source, rects[panel.id]))
+            style = resolve(self.project, panel)["style"]
+            rect = rects[panel.id]
+            try:
+                box = content_box(rect, panel, style)
+            except ValueError:
+                source, box = None, rect
+            panels.append((source, box, panel.label, rect, style))
         size = self.project.size
         result = compose_pdf(size.width_mm, size.height_mm, panels)
         if format != "pdf":
@@ -130,6 +165,24 @@ class Session:
         return {"path": str(path.resolve())}
 
     def action(self, endpoint, data):
+        if endpoint == "/api/asset":
+            path = Path(data["path"]).expanduser()
+            panel = next(panel for panel in self.project.panels if panel.id == data["panel"])
+            extensions = {"image": {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp"},
+                          "vector": {".pdf", ".svg"}}
+            suffix = path.suffix.lower()
+            if suffix not in extensions.get(panel.type, set()):
+                raise ValueError("Choose an asset matching this panel type.")
+            if path.stat().st_size > 150 * 1024 * 1024:
+                raise ValueError("Choose an asset smaller than 150 MB.")
+            content = path.read_bytes()
+            asset = f"assets/{sha256(content).hexdigest()}{suffix}"
+            atomic_write(self.workspace / asset, lambda file: file.write_bytes(content))
+            project = asdict(self.project)
+            record = next(item for item in project["panels"] if item["id"] == panel.id)
+            record["asset"] = asset
+            record["settings"]["filename"] = path.name
+            return self.update(project)
         if endpoint == "/api/style-json":
             result = resolve(self.project)
             result["size_mm"] = [self.project.size.width_mm, self.project.size.height_mm]
@@ -156,13 +209,16 @@ class Session:
         if endpoint == "/api/new":
             self.__init__(workspaces=self.workspaces)
         elif endpoint == "/api/open":
-            self.__init__(data["path"], self.workspaces)
+            self.__init__(Path(data["path"]).expanduser(), self.workspaces)
+            self.render_native_panels(Layout(self.project).rects)
         elif endpoint == "/api/save":
             path = Path(data["path"]).expanduser() if data.get("path") else self.bundle
             if not path:
                 raise ValueError("Choose a .plate file to save.")
             if path.suffix.lower() != ".plate":
                 path = path.with_suffix(".plate")
+            if data.get("cache"):
+                write_json(self.workspace / "cache/index.json", self.renders)
             save_bundle(self.project, self.workspace, path, data.get("cache", False))
             self.bundle = path.resolve()
         else:
@@ -246,4 +302,5 @@ class Handler(BaseHTTPRequestHandler):
 def make_server(bundle=None, workspaces=WORKSPACES):
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server.session = Session(bundle, workspaces)
+    server.session.render_native_panels(Layout(server.session.project).rects)
     return server
