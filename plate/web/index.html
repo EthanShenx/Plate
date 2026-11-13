@@ -18,6 +18,14 @@
   <section class="stage" aria-label="Figure canvas">
     <div class="stage-bar"><span id="measure"></span><span class="spacer"></span><button id="undo">Undo</button><button id="redo">Redo</button><button id="zoom-out" aria-label="Zoom out">−</button><button id="zoom-in" aria-label="Zoom in">+</button></div>
     <div class="viewport"><div id="frame"></div></div>
+  <section id="script-drawer" class="script-drawer" aria-label="Script editor" hidden>
+      <div class="editor-bar">
+        <strong id="editor-title">Script</strong><span id="editor-status"></span><span class="spacer"></span>
+        <button id="dependencies">Dependencies</button><button id="reveal-script">Reveal script</button>
+        <button id="save-script">Save script</button><button id="run-script" class="primary">Run</button>
+      </div>
+      <div id="script-editor"></div><pre id="console" class="console" aria-label="Render console"></pre>
+    </section>
   </section>
   <aside class="inspector"><div class="inspector-tabs"><button id="show-inspector" aria-pressed="true">Inspector</button><button id="show-checks" aria-pressed="false">Checks</button></div><h2 id="inspector-title">Figure settings</h2><div id="settings"></div><div id="checks" hidden></div></aside>
 </main>

@@ -127,8 +127,8 @@ def open_bundle(path, workspaces):
     return project, workspace
 
 
-def save_bundle(project, workspace, path, include_cache=False):
-    write_workspace(project, workspace)
+def save_bundle(project, workspace, path, include_cache=False, write_scripts=True):
+    write_workspace(project, workspace, write_scripts=write_scripts)
     files = [workspace / f"{key}.json" for key in ("manifest", "layout", "style", "palettes")]
     for panel in project.panels:
         files.append(workspace / "panels" / panel.id / "panel.json")

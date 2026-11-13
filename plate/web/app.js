@@ -1,5 +1,19 @@
 const $ = selector => document.querySelector(selector);
+const { createEditor } = await import("/vendor/editor.js").catch(() => ({
+  createEditor(parent, language, source, onChange) {
+    const input = document.createElement("textarea");
+    input.setAttribute("aria-label", "Panel script");
+    input.value = source;
+    input.oninput = () => onChange(input.value);
+    parent.append(input);
+    return { replace(value) { input.value = value; }, destroy() { input.remove(); } };
+  },
+}));
 let state;
+let editor;
+let editorId;
+let interpreters = {};
+const drafts = new Map();
 let journals;
 let selected = null;
 let zoom = 3.1;
@@ -594,30 +608,131 @@ function drawPanelInspector(panel) {
       button("Delete panel", () => layout("delete")));
     return;
   }
-  const script = document.createElement("textarea");
-  script.rows = 9;
-  script.value = panel.script;
-  script.spellcheck = false;
-  const render = state.renders[panel.id] || {};
-  const output = document.createElement("pre");
-  output.className = "console";
-  output.textContent = [render.error, render.stdout, render.stderr, ...(render.warnings || [])]
-    .filter(Boolean).join("\n");
   $("#settings").replaceChildren(...basics,
-    stringField("Interpreter override", panel.interpreter, value => editPanel(panel, p => { p.interpreter = value; })),
-    field("Plot script", script),
-    button("Refresh panel", async () => {
-      if (script.value !== panel.script && !await editPanel(panel, p => { p.script = script.value; })) return;
-      refresh([panel.id]);
-    }),
-    button("Check dependencies", async () => {
-      try {
-        const info = await request("/api/dependencies", { panel: panel.id });
-        output.textContent = info.missing.length ? `Missing ${info.missing.join(", ")}\n${info.install}` :
-          `${info.path} · ${info.version}\nRequired packages are available.`;
-      } catch (error) { output.textContent = error.message; }
-    }),
-    output, drawOverrides(panel), button("Delete panel", () => layout("delete")));
+    interpreterField("Interpreter override", panel.type, panel.interpreter,
+      value => editPanel(panel, p => { p.interpreter = value; })),
+    drawOverrides(panel), button("Delete panel", () => layout("delete")));
+
+}
+
+function interpreterField(caption, type, value, update) {
+  const wrapper = stringField(caption, value, update);
+  const input = wrapper.querySelector("input");
+  const list = document.createElement("datalist");
+  list.id = `interpreters-${type}`;
+  input.setAttribute("list", list.id);
+  for (const path of interpreters[type] || []) list.append(new Option(path, path));
+  wrapper.append(list);
+  return wrapper;
+}
+
+function draftFor(panel) {
+  if (!drafts.has(panel.id)) drafts.set(panel.id, { base: panel.script, value: panel.script });
+  return drafts.get(panel.id);
+}
+
+function reconcileDraft(panel, promptConflict = true) {
+  const draft = draftFor(panel);
+  if (panel.script === draft.base) return draft;
+  if (draft.value === draft.base || draft.value === panel.script) draft.value = panel.script;
+  else if (promptConflict && !confirm(`“${panel.name}” changed on disk. Keep your unsaved editor changes? Cancel loads the disk version.`)) {
+    draft.value = panel.script;
+  } else if (!promptConflict) return draft;
+  draft.base = panel.script;
+  return draft;
+}
+
+function editorStatus(draft) {
+  $("#editor-status").textContent = draft.value === draft.base ? "" : "Unsaved edits";
+  $("#save-script").disabled = draft.value === draft.base;
+}
+
+function drawEditor(panel) {
+  const open = panel && isScript(panel);
+  $("#script-drawer").hidden = !open;
+  $(".stage").classList.toggle("with-editor", Boolean(open));
+  if (!open || editorId !== panel.id) {
+    editor?.destroy();
+    editor = null;
+    editorId = null;
+  }
+  if (!open) return;
+  const draft = reconcileDraft(panel);
+  if (!editor) {
+    editorId = panel.id;
+    editor = createEditor($("#script-editor"), panel.type, draft.value, text => {
+      draft.value = text;
+      editorStatus(draft);
+    });
+  } else editor.replace(draft.value);
+  editorStatus(draft);
+  $("#editor-title").textContent = `${typeNames[panel.type]} · ${panel.name}`;
+  const render = state.renders[panel.id] || {};
+  $("#console").textContent = [render.error, render.stdout, render.stderr, ...(render.warnings || [])]
+    .filter(Boolean).join("\n") || "Run the script to see render output.";
+}
+
+async function saveDraft(panel) {
+  if (busy) return false;
+  const draft = reconcileDraft(panel);
+  if (draft.value === draft.base) return true;
+  busy = true;
+  try {
+    while (true) {
+      const sent = draft.value;
+      const result = await request("/api/script", { panel: panel.id, script: sent, base: draft.base });
+      if (!result.conflict) {
+        draft.base = sent;
+        state = result;
+        draw();
+        return true;
+      }
+      panel.script = result.script;
+      reconcileDraft(panel);
+      if (draft.value === draft.base) {
+        state = await request("/api/project");
+        draw();
+        return true;
+      }
+    }
+  } catch (error) { report(error.message); return false; }
+  finally { busy = false; }
+}
+
+async function pollScripts() {
+  if (busy || !state) return;
+  try {
+    const result = await request("/api/scripts");
+    if (busy || result.id !== state.project.id) return;
+    const changed = state.project.panels.some(panel => isScript(panel) && result.scripts[panel.id] !== panel.script);
+    if (changed) {
+      const latest = await request("/api/project");
+      if (busy || latest.project.id !== state.project.id) return;
+      state = latest;
+      draw();
+    }
+  } catch { /* The next poll can reconnect after a transient failure. */ }
+}
+
+function activeScript() {
+  return state.project.panels.find(panel => panel.id === selected && isScript(panel));
+}
+
+async function runSelected() {
+  const panel = activeScript();
+  if (panel && await saveDraft(panel)) refresh([panel.id]);
+}
+
+async function findInterpreters() {
+  try {
+    interpreters = await request("/api/interpreters", { venvs: state.project.interpreters.venvs || [] });
+    if (!busy) {
+      for (const list of $("#settings").querySelectorAll("datalist")) {
+        const paths = interpreters[list.id.replace("interpreters-", "")] || [];
+        list.replaceChildren(...paths.map(path => new Option(path, path)));
+      }
+    }
+  } catch (error) { report(error.message); }
 }
 
 function drawChecks() {
@@ -656,6 +771,7 @@ function draw() {
   $("#inspector-title").textContent = panel ? panel.name : "Figure settings";
   drawCanvas();
   drawPanels();
+  drawEditor(panel);
   drawChecks();
   report(bundle || "Working copy · Save to create a .plate bundle");
   const openGroups = new Set([...$("#settings").querySelectorAll("details[open] summary")]
@@ -691,8 +807,14 @@ function draw() {
     stringField("Data root", project.data_root, value => change(p => { p.data_root = value; })),
     numeric("Render timeout (seconds)", project.timeout_s, value => change(p => { p.timeout_s = value; }), 1),
     ...["script-r", "script-py"].map(type =>
-      stringField(type === "script-r" ? "Default Rscript" : "Default Python", project.interpreters[type] || "",
+      interpreterField(type === "script-r" ? "Default Rscript" : "Default Python", type, project.interpreters[type] || "",
         value => change(p => { p.interpreters[type] = value; }))),
+    stringField("Extra venv paths (comma separated)", (project.interpreters.venvs || []).join(", "), async value => {
+      if (await change(p => { p.interpreters.venvs = value.split(",").map(path => path.trim()).filter(Boolean); })) {
+        findInterpreters();
+      }
+    }),
+    button("Detect interpreters", findInterpreters),
     button("Export style JSON", async () => {
       try { downloadJson("plate-style.json", await request("/api/style-json", {})); }
       catch (error) { report(error.message); }
@@ -713,7 +835,10 @@ async function action(name, data = {}) {
   busy = true;
   try {
     state = await request(`/api/${name}`, data);
-    if (name === "new" || name === "open") { selected = null; past = []; future = []; }
+    if (name === "new" || name === "open") {
+      selected = null; past = []; future = []; drafts.clear();
+      findInterpreters();
+    }
     draw();
   }
   catch (error) { report(error.message); }
@@ -769,11 +894,29 @@ $("#export-form").onsubmit = async event => {
   } catch (error) { $("#export-warnings").textContent = error.message; }
   finally { submit.disabled = false; }
 };
+$("#save-script").onclick = () => { const panel = activeScript(); if (panel) saveDraft(panel); };
+$("#run-script").onclick = runSelected;
+$("#dependencies").onclick = async () => {
+  const panel = activeScript();
+  if (!panel) return;
+  try {
+    const info = await request("/api/dependencies", { panel: panel.id });
+    $("#console").textContent = info.missing.length ? `Missing ${info.missing.join(", ")}\n${info.install}` :
+      `${info.path} · ${info.version}\nRequired packages are available.`;
+  } catch (error) { $("#console").textContent = error.message; }
+};
+$("#reveal-script").onclick = async () => {
+  const panel = activeScript();
+  if (!panel) return;
+  try { report((await request("/api/reveal-script", { panel: panel.id })).path); }
+  catch (error) { report(error.message); }
+};
 $("#refresh-all").onclick = () => refresh();
 document.addEventListener("keydown", event => {
   if (!(event.metaKey || event.ctrlKey) || event.key !== "Enter") return;
   event.preventDefault();
   if (event.shiftKey) refresh();
+  else if (activeScript()) runSelected();
   else if (selected) refresh([selected]);
 });
 $("#new").onclick = () => action("new");
@@ -781,13 +924,23 @@ $("#open").onclick = () => {
   const path = prompt("Path to a .plate bundle");
   if (path) action("open", { path });
 };
+async function saveProject(path, cache = false) {
+  for (const panel of state.project.panels.filter(isScript)) {
+    const draft = drafts.get(panel.id);
+    if (draft && draft.value !== draft.base && !await saveDraft(panel)) return;
+  }
+  await action("save", { path, cache });
+}
+
 $("#save").onclick = () => {
   const path = state.bundle || prompt("Save .plate bundle to this path");
-  if (path) action("save", { path });
+  if (path) saveProject(path);
 };
 $("#project-name").onchange = event => change(p => { p.name = event.target.value.trim() || "Untitled figure"; });
 
 try {
   [state, journals] = await Promise.all([request("/api/project"), request("/api/presets")]);
   draw();
+  findInterpreters();
+  setInterval(pollScripts, 1000);
 } catch (error) { report(error.message); }

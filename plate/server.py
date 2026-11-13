@@ -12,7 +12,7 @@ from threading import RLock
 from urllib.parse import urlsplit
 from zipfile import BadZipFile
 
-from .bundle import SAFE_ID, atomic_write, open_bundle, save_bundle, write_json, write_workspace
+from .bundle import SAFE_ID, atomic_write, open_bundle, save_bundle, script_path, write_json, write_workspace
 from .checks import project_checks
 from .layout import Layout, apply
 from .model import Project, SCRIPT_EXTENSIONS, project_from_dict, presets
@@ -22,6 +22,7 @@ from .fonts import get_font
 from .interpreters import discovery, interpreter, probe
 from .render import render_script, signature
 from .style import BUILTINS, ENUMS, PT_PER_MM, TOKENS, content_box, resolve, validate_style
+from .watcher import Watcher, save_script, sync_scripts
 
 WEB = Path(__file__).parent / "web"
 WORKSPACES = Path.home() / "Library/Application Support/Plate/workspaces"
@@ -30,7 +31,8 @@ WORKSPACES = Path.home() / "Library/Application Support/Plate/workspaces"
 class Session:
     def __init__(self, bundle=None, workspaces=WORKSPACES):
         self.workspaces = workspaces
-        self.lock = RLock()
+        if not hasattr(self, "lock"):
+            self.lock = RLock()
         self.renders = {}
         self.bundle = Path(bundle).resolve() if bundle else None
         if self.bundle:
@@ -125,11 +127,19 @@ class Session:
 
     def update(self, data):
         project = project_from_dict(data)
+        current = {panel.id: panel for panel in self.project.panels}
+        for panel in project.panels:
+            if panel.id in current and panel.type in SCRIPT_EXTENSIONS:
+                panel.script = current[panel.id].script
         if project.id != self.project.id:
             raise ValueError("This project is no longer open.")
         Layout(project)
         validate_style(project)
-        write_workspace(project, self.workspace)
+        for panel in project.panels:
+            if panel.type in SCRIPT_EXTENSIONS and not script_path(self.workspace, panel).exists():
+                atomic_write(script_path(self.workspace, panel),
+                             lambda tmp: tmp.write_text(panel.script, encoding="utf-8"))
+        write_workspace(project, self.workspace, write_scripts=False)
         self.project = project
         self.render_native_panels(Layout(project).rects)
         return self.state()
@@ -165,6 +175,18 @@ class Session:
         return {"path": str(path.resolve())}
 
     def action(self, endpoint, data):
+        sync_scripts(self.project, self.workspace)
+        if endpoint == "/api/script":
+            source = data["script"]
+            if not isinstance(source, str):
+                raise ValueError("Script must be text.")
+            result = save_script(self.project, self.workspace, data["panel"], source, data["base"])
+            return result if result["conflict"] else self.state()
+        if endpoint == "/api/reveal-script":
+            panel = next(panel for panel in self.project.panels if panel.id == data["panel"])
+            path = script_path(self.workspace, panel)
+            subprocess.run(["/usr/bin/open", "-R", str(path)], check=True, timeout=5)
+            return {"path": str(path)}
         if endpoint == "/api/asset":
             path = Path(data["path"]).expanduser()
             panel = next(panel for panel in self.project.panels if panel.id == data["panel"])
@@ -219,7 +241,7 @@ class Session:
                 path = path.with_suffix(".plate")
             if data.get("cache"):
                 write_json(self.workspace / "cache/index.json", self.renders)
-            save_bundle(self.project, self.workspace, path, data.get("cache", False))
+            save_bundle(self.project, self.workspace, path, data.get("cache", False), write_scripts=False)
             self.bundle = path.resolve()
         else:
             raise ValueError("Unknown project action.")
@@ -264,6 +286,15 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_error(404)
                     return
                 self.send(preview.read_bytes(), "image/png")
+        elif path == "/api/scripts":
+            with self.server.session.lock:
+                session = self.server.session
+                sync_scripts(session.project, session.workspace)
+                self.json({
+                    "id": session.project.id,
+                    "scripts": {panel.id: panel.script for panel in session.project.panels
+                                if panel.type in SCRIPT_EXTENSIONS},
+                })
         elif path == "/api/project":
             with self.server.session.lock:
                 self.json(self.server.session.state())
@@ -299,8 +330,18 @@ class Handler(BaseHTTPRequestHandler):
             logging.getLogger("plate").info(format, *args)
 
 
+class PlateServer(ThreadingHTTPServer):
+    def server_close(self):
+        if hasattr(self, "watcher"):
+            self.watcher.close()
+            self.watcher.join(timeout=1)
+        super().server_close()
+
+
 def make_server(bundle=None, workspaces=WORKSPACES):
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server = PlateServer(("127.0.0.1", 0), Handler)
     server.session = Session(bundle, workspaces)
     server.session.render_native_panels(Layout(server.session.project).rects)
+    server.watcher = Watcher(server.session)
+    server.watcher.start()
     return server

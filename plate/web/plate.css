@@ -107,3 +107,12 @@ h3 { font-size: 12px; }
 .tile:has(.plot-preview:not([hidden])) { background: white; border-color: transparent; }
 .tile:has(.plot-preview:not([hidden])) .render-badge { opacity: .95; }
 .asset-meta { overflow-wrap: anywhere; font-size: 11px; }
+.stage.with-editor { grid-template-rows: 36px minmax(100px, 1fr) minmax(170px, 34%); }
+.script-drawer { min-height: 0; display: grid; grid-template-rows: auto minmax(65px, 1fr) minmax(35px, 27%); border-top: 1px solid var(--line); background: var(--paper); }
+.editor-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; padding: 6px 9px; border-bottom: 1px solid var(--line); font-size: 11px; }
+.editor-bar button { padding: 4px 6px; }
+#editor-status { color: #79522a; }
+#script-editor, #script-editor .cm-editor { min-height: 0; height: 100%; }
+#script-editor .cm-scroller { font: 12px/1.5 "IBM Plex Mono", monospace; }
+#script-editor textarea { width: 100%; height: 100%; border: 0; border-radius: 0; font: 12px monospace; }
+#console { margin: 0; padding: 6px 9px; background: #f2f5ee; border-top: 1px solid var(--line); overflow: auto; }

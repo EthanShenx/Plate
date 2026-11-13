@@ -1,0 +1,17 @@
+{
+  "name": "plate-editor",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild plate/web/editor.js --bundle --format=esm --minify --outfile=plate/web/vendor/editor.js"
+  },
+  "dependencies": {
+    "@codemirror/lang-python": "^6.2.1",
+    "@codemirror/language": "^6.11.3",
+    "@codemirror/legacy-modes": "^6.5.1",
+    "codemirror": "^6.0.2"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.12"
+  }
+}
