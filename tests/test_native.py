@@ -41,6 +41,10 @@ class NativePanels(unittest.TestCase):
                 self.assertAlmostEqual(page.rect.width / PT_PER_MM, 183, delta=.01)
                 self.assertEqual(len(page.get_xobjects()), 4)
                 self.assertTrue(all(item[2] == 0 for item in page.get_xobjects()))
+                forms = [exported.xref_stream(item[0]) for item in page.get_xobjects()]
+                self.assertNotIn(b" re W n", forms[0])
+                self.assertNotIn(b" re W n", forms[1])
+                self.assertIn(b" re W n", forms[2])
                 text = page.get_text().replace("\xa0", " ").splitlines()
                 for expected in ("a", "b", "c", "d", "Native text", "Control", "Vector text"):
                     self.assertIn(expected, text)

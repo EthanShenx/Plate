@@ -42,9 +42,12 @@ def placement(page, source, rect):
     dx, dy = (rect.width - crop_w) / 2, (rect.height - crop_h) / 2
     destination = pdf.Rect(rect.x0 + dx, rect.y0 + dy, rect.x1 - dx, rect.y1 - dy)
     content = page.show_pdf_page(destination, source, 0, clip=clip, keep_proportion=False)
-    overflow = not clip.contains(full) or any(
-        not full.contains(pdf.Rect(entry[1])) for entry in source_page.get_bboxlog()
-    )
+    # PDF coordinates pass through single-precision page bounds and an
+    # approximate graphics bbox. Ignore sub-millipoint placement roundoff.
+    tolerance = 0.002
+    allowed = clip + (-tolerance, -tolerance, tolerance, tolerance)
+    overflow = any(not allowed.contains(pdf.Rect(entry[1]))
+                   for entry in source_page.get_bboxlog())
     return flatten_placement(page.parent, page, content), overflow
 
 
