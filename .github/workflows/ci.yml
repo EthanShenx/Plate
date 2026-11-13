@@ -25,7 +25,9 @@ jobs:
           python -m venv .venv
           .venv/bin/python -m pip install -r requirements-test.txt
           Rscript -e 'install.packages(c("ggplot2", "jsonlite", "systemfonts", "patchwork"), repos="https://cloud.r-project.org")'
+          brew install --cask xquartz
           brew install librsvg
+          Rscript -e 'stopifnot(isTRUE(capabilities("cairo"))); cairo_pdf(tempfile()); plot.new(); dev.off()'
       - name: Build editor and test
         run: |
           make editor

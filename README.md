@@ -19,7 +19,7 @@ For the default environment and the sample project, install the plotting package
 Rscript -e 'install.packages(c("ggplot2", "jsonlite", "systemfonts", "patchwork"), repos="https://cloud.r-project.org")'
 ```
 
-Use `brew install librsvg` if you plan to import SVG. You can check an individual interpreter and copy the relevant package command from the **Dependencies** button. Plot packages are installed by the user.
+Use `brew install librsvg` if you plan to import SVG. If **Dependencies** reports a missing Cairo PDF device in CRAN R, install [XQuartz](https://www.xquartz.org/) with `brew install --cask xquartz`. You can check an individual interpreter and copy the relevant package command from the **Dependencies** button. Plot packages are installed by the user.
 
 ## Five-minute tutorial
 

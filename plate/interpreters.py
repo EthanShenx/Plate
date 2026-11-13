@@ -90,13 +90,20 @@ def _probe(path, language, modified, refresh):
         names = ",".join(f'"{pkg}"' for pkg in R_PACKAGES)
         args = ["--vanilla", "-e",
                 f'cat(as.character(getRversion()), "\\n"); p <- c({names}); '
-                'cat(paste(p[!sapply(p, requireNamespace, quietly=TRUE)], collapse=","))']
+                'cat(paste(p[!sapply(p, requireNamespace, quietly=TRUE)], collapse=","), "\\n"); '
+                'ok <- tryCatch({ f <- tempfile(); cairo_pdf(f); plot.new(); dev.off(); '
+                'unlink(f); TRUE }, warning=function(w) FALSE, error=function(e) FALSE); '
+                'cat(if(ok) "cairo-ok" else "cairo-missing")']
         install = f'{shlex.quote(path)} -e \'install.packages(c({names}), repos="https://cloud.r-project.org")\''
     result = subprocess.run([path, *args], capture_output=True, text=True, timeout=15)
     if result.returncode:
         raise ValueError(result.stderr.strip() or "Interpreter check failed.")
-    lines = result.stdout.strip().splitlines()
-    return {"version": lines[0].strip(), "missing": lines[1].split(",") if len(lines) > 1 else [],
+    lines = result.stdout.rstrip().splitlines()
+    missing = [pkg.strip() for pkg in lines[1].split(",") if pkg.strip()] if len(lines) > 1 else []
+    if language == "script-r" and lines[-1] != "cairo-ok":
+        missing.append("Cairo PDF device")
+        install = "brew install --cask xquartz\n" + install
+    return {"version": lines[0].strip(), "missing": missing,
             "install": install, "path": path}
 
 
