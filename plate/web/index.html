@@ -11,7 +11,7 @@
   <span class="brand"><i aria-hidden="true"></i>Plate</span>
   <input id="project-name" aria-label="Project name">
   <div class="spacer"></div>
-  <button id="refresh-all" title="⌘⇧Enter">Refresh all stale</button><button id="new">New</button><button id="open">Open</button><button id="save">Save</button>
+  <button id="refresh-all" title="⌘⇧Enter">Refresh all stale</button><button id="new">New</button><button id="open">Open</button><button id="save">Save</button><button id="export" class="primary">Export</button>
 </header>
 <main>
   <aside class="navigator"><h2>Panels</h2><div class="add-row"><select id="panel-type" aria-label="Panel type"><option value="script-py">Python</option><option value="script-r">R</option></select><button id="add">Add</button></div><div id="panel-list"></div></aside>
@@ -22,6 +22,16 @@
   <aside class="inspector"><h2 id="inspector-title">Figure settings</h2><div id="settings"></div></aside>
 </main>
 <footer id="status" role="status"></footer>
+<dialog id="export-dialog">
+  <form id="export-form">
+    <h2>Export figure</h2>
+    <label class="field">Format<select id="export-format"><option value="pdf">Editable PDF</option><option value="png">PNG</option><option value="tiff">TIFF</option></select></label>
+    <label class="field" id="dpi-field">Resolution<select id="export-dpi"><option>300</option><option>600</option><option>1200</option></select></label>
+    <label class="field">Save to<input id="export-path" required placeholder="/path/to/figure.pdf"></label>
+    <p id="export-warnings" role="status"></p>
+    <div class="dialog-actions"><button type="button" id="cancel-export">Cancel</button><button type="submit" class="primary">Export</button></div>
+  </form>
+</dialog>
 <script type="module" src="/app.js"></script>
 </body>
 </html>

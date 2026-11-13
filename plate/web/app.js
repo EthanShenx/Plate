@@ -412,6 +412,30 @@ document.addEventListener("keydown", event => {
   else history(past, future);
 });
 
+const exportDialog = $("#export-dialog");
+$("#export-format").onchange = () => { $("#dpi-field").hidden = $("#export-format").value === "pdf"; };
+$("#export").onclick = () => {
+  if (busy) return;
+  const stale = Object.values(state.renders).filter(item => item.state && item.state !== "fresh").length;
+  $("#export-warnings").textContent = stale ? `${stale} panel(s) need refresh. The PDF will use available renders.` : "";
+  $("#export-path").value = state.bundle.replace(/\.plate$/i, ".pdf");
+  $("#export-format").onchange();
+  exportDialog.showModal();
+};
+$("#cancel-export").onclick = () => exportDialog.close();
+$("#export-form").onsubmit = async event => {
+  event.preventDefault();
+  const submit = event.submitter;
+  submit.disabled = true;
+  try {
+    const result = await request("/api/export", {
+      format: $("#export-format").value, dpi: Number($("#export-dpi").value), path: $("#export-path").value,
+    });
+    exportDialog.close();
+    report(`Exported ${result.path}`);
+  } catch (error) { $("#export-warnings").textContent = error.message; }
+  finally { submit.disabled = false; }
+};
 $("#refresh-all").onclick = () => refresh();
 document.addEventListener("keydown", event => {
   if (!(event.metaKey || event.ctrlKey) || event.key !== "Enter") return;

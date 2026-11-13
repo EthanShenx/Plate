@@ -11,9 +11,10 @@ from threading import RLock
 from urllib.parse import urlsplit
 from zipfile import BadZipFile
 
-from .bundle import SAFE_ID, open_bundle, save_bundle, write_json, write_workspace
+from .bundle import SAFE_ID, atomic_write, open_bundle, save_bundle, write_json, write_workspace
 from .layout import Layout, apply
 from .model import Project, SCRIPT_EXTENSIONS, project_from_dict, presets
+from .export import FORMATS, compose_pdf, rasterize
 from .interpreters import discovery, interpreter, probe
 from .render import render_script, signature
 from .style import TOKENS
@@ -99,7 +100,32 @@ class Session:
         self.project = project
         return self.state()
 
+    def export(self, data):
+        format = data["format"]
+        if format not in FORMATS:
+            raise ValueError("Choose PDF, PNG or TIFF.")
+        path = Path(data["path"]).expanduser().with_suffix(f".{format}")
+        if self.bundle and path.resolve() == self.bundle:
+            raise ValueError("Choose a separate destination for the export.")
+        rects = Layout(self.project).rects
+        panels = []
+        for panel in self.project.panels:
+            previous = self.render_state(panel, rects[panel.id])
+            key = previous.get("key")
+            source = self.workspace / "cache" / f"{key}.pdf" if key else None
+            if source and not source.is_file():
+                source = None
+            panels.append((source, rects[panel.id]))
+        size = self.project.size
+        result = compose_pdf(size.width_mm, size.height_mm, panels)
+        if format != "pdf":
+            result = rasterize(result, size.width_mm, size.height_mm, format, data["dpi"])
+        atomic_write(path, lambda file: file.write_bytes(result))
+        return {"path": str(path.resolve())}
+
     def action(self, endpoint, data):
+        if endpoint == "/api/export":
+            return self.export(data)
         if endpoint == "/api/refresh":
             requested = data.get("panels")
             if requested is None:
