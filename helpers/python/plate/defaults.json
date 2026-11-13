@@ -2,7 +2,7 @@
   "style": {
     "font_family": "Arial", "font_main_pt": 7, "font_min_pt": 5,
     "axis_title_pt": null, "tick_label_pt": null, "legend_title_pt": null,
-    "legend_text_pt": null, "annotation_pt": null, "panel_label_pt": 8,
+    "legend_text_pt": null, "annotation_pt": null, "panel_label_pt": null,
     "panel_label_weight": "bold",
     "line_data_pt": 0.75, "line_axis_pt": 0.5,
     "tick_length_pt": 2.5, "tick_width_pt": 0.5, "tick_direction": "out",

@@ -17,7 +17,7 @@ from .style import HELPERS, PT_PER_MM, context_for
 
 WORKERS = Path(__file__).parent / "workers"
 ABSOLUTE_PATH = re.compile(r"""['"](?:/(?!/)|[A-Za-z]:[\\/]|~/)""")
-ENGINE_VERSION = 1
+ENGINE_VERSION = 2
 
 
 def signature(project, panel, rect, context=None, path=None, version=None):
@@ -105,6 +105,13 @@ def plot_process(command, cwd, env, timeout):
         return process.returncode, output.decode(errors="replace"), errors.decode(errors="replace")
 
 
+def data_directory(project, workspace, bundle):
+    if project.data_root:
+        root = Path(project.data_root).expanduser()
+        return root if root.is_absolute() else (bundle.parent if bundle else workspace) / root
+    return bundle.parent if bundle else workspace
+
+
 def render_script(project, panel, rect, workspace, bundle, context=None):
     started = monotonic()
     context = context or context_for(project, panel, rect)
@@ -114,8 +121,7 @@ def render_script(project, panel, rect, workspace, bundle, context=None):
         info = probe(path, panel.type, refresh=True)
     if info["missing"]:
         raise RenderError("Missing packages: " + ", ".join(info["missing"]), stderr=info["install"])
-    cwd = Path(project.data_root).expanduser() if project.data_root else (
-        bundle.parent if bundle else workspace)
+    cwd = data_directory(project, workspace, bundle)
     if not cwd.is_dir():
         raise RenderError(f"Data root does not exist: {cwd}")
     key = signature(project, panel, rect, context, path, info["version"] + str(cwd.resolve()))
@@ -161,6 +167,7 @@ def render_script(project, panel, rect, workspace, bundle, context=None):
         os.replace(pdf, output)
         result = {
             "key": key, "signature": signature(project, panel, rect, context), "state": "fresh",
+            "interpreter_stamp": [path, Path(path).stat().st_mtime_ns],
             "stdout": stdout, "stderr": stderr, "seconds": monotonic() - started,
             "warnings": ["Script contains an absolute path."] if ABSOLUTE_PATH.search(panel.script) else [],
             "metadata": parsed,

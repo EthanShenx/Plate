@@ -16,7 +16,9 @@ let interpreters = {};
 const drafts = new Map();
 let journals;
 let selected = null;
+const CSS_PX_PER_MM = 96 / 25.4;
 let zoom = 3.1;
+let viewMode = "fit";
 let past = [];
 let future = [];
 let busy = false;
@@ -116,7 +118,7 @@ function dropZone(parent, edge, target, frame = false) {
   const zone = document.createElement("div");
   zone.className = `drop-zone ${edge}${frame ? " frame-zone" : ""}`;
   zone.ondragover = event => {
-    if (!dragged || dragged === target) return;
+    if (!dragged || dragged === target || (dragged === "new" && edge === "center")) return;
     event.preventDefault();
     zone.classList.add("over");
     event.dataTransfer.dropEffect = "move";
@@ -127,7 +129,9 @@ function dropZone(parent, edge, target, frame = false) {
     event.stopPropagation();
     const panel = dragged;
     endDrag();
-    if (panel && panel !== target) layout("move", { panel, target, edge });
+    if (panel === "new") {
+      if (edge !== "center") addPanel(target, edge);
+    } else if (panel && panel !== target) layout("move", { panel, target, edge });
   };
   parent.append(zone);
 }
@@ -197,9 +201,25 @@ function resizeHandle(key, handle) {
   return node;
 }
 
+function calibratedScale() {
+  const value = Number(state.pixels_per_mm);
+  return value > 0 ? value : CSS_PX_PER_MM;
+}
+
+function fitScale() {
+  const viewport = $(".viewport");
+  const {width_mm, height_mm} = state.project.size;
+  return Math.max(.1, Math.min((viewport.clientWidth - 56) / width_mm,
+                              (viewport.clientHeight - 56) / height_mm));
+}
+
 function drawCanvas() {
   const frame = $("#frame");
   const { project, geometry } = state;
+  if (viewMode === "fit") zoom = fitScale();
+  else if (viewMode === "actual") zoom = calibratedScale();
+  $("#fit-view").setAttribute("aria-pressed", String(viewMode === "fit"));
+  $("#actual-size").setAttribute("aria-pressed", String(viewMode === "actual"));
   const { width_mm, height_mm } = project.size;
   frame.style.width = `${width_mm * zoom}px`;
   frame.style.height = `${height_mm * zoom}px`;
@@ -279,6 +299,7 @@ function drawCanvas() {
   if (journal?.max_height_mm) {
     const guide = document.createElement("div");
     guide.className = "height-guide";
+    guide.classList.toggle("outside", journal.max_height_mm > height_mm);
     guide.style.top = `${Math.min(journal.max_height_mm, height_mm) * zoom}px`;
     guide.textContent = `${journal.name} guide · ${journal.max_height_mm} mm`;
     frame.append(guide);
@@ -311,7 +332,7 @@ function drawPanels() {
       event.preventDefault();
       const source = dragged;
       endDrag();
-      if (!source || source === panel.id) return;
+      if (!source || source === "new" || source === panel.id) return;
       change(project => {
         const index = project.panels.findIndex(p => p.id === panel.id);
         const [moved] = project.panels.splice(project.panels.findIndex(p => p.id === source), 1);
@@ -326,9 +347,9 @@ function editPanel(panel, mutate) {
   return change(project => mutate(project.panels.find(item => item.id === panel.id)));
 }
 
-function stringField(caption, value, onChange, type = "text") {
+function stringField(caption, value, onChange) {
   const input = document.createElement("input");
-  Object.assign(input, { type, value });
+  Object.assign(input, { type: "text", value });
   input.onchange = () => onChange(input.value);
   return field(caption, input);
 }
@@ -552,7 +573,7 @@ function drawOverrides(panel) {
         key === "colors" ? {} : (state.project.style[key] ?? state.style_tokens[key]);
       editPanel(panel, p => { p.overrides[key] = value; });
     }));
-  return section(`Style overrides${keys.length ? ` (${keys.length})` : ""}`, controls,
+  return section("Style overrides", controls,
     keys.length > 0 || panel.overrides.opt_out);
 }
 
@@ -627,7 +648,7 @@ function drawPanelInspector(panel) {
   const {x, y, w, h} = state.geometry.rects[panel.id];
   const dimensions = Object.entries({x, y, w, h}).map(([key, value]) =>
     numeric(`${key.toUpperCase()} (mm)`, Number(value.toFixed(5)),
-      next => layout("edit", { field: key, value: next }), key.length));
+      next => layout("edit", { field: key, value: next })));
   const locks = ["w", "h"].map(key => {
     const box = document.createElement("input");
     Object.assign(box, { type: "checkbox", checked: key in panel.locks });
@@ -641,6 +662,7 @@ function drawPanelInspector(panel) {
   ];
   if (!isScript(panel)) {
     $("#settings").replaceChildren(...basics, ...nativeInspector(panel), drawOverrides(panel),
+      button("Refresh panel", () => refresh([panel.id])),
       button("Delete panel", () => layout("delete")));
     return;
   }
@@ -745,7 +767,10 @@ async function pollScripts() {
       const latest = await request("/api/project");
       if (busy || latest.project.id !== state.project.id) return;
       state = latest;
-      draw();
+      drawEditor(activeScript());
+      drawCanvas();
+      drawPanels();
+      drawChecks();
     }
   } catch { /* The next poll can reconnect after a transient failure. */ }
 }
@@ -785,7 +810,11 @@ function drawChecks() {
   }
   $("#checks").replaceChildren(...state.checks.map(check => {
     const panel = state.project.panels.find(item => item.id === check.panel);
-    const row = button(check.message, () => { if (panel) selectPanel(panel.id); });
+    const row = button(check.message, () => {
+      if (!panel) return;
+      selectPanel(panel.id);
+      panels.get(panel.id)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    });
     row.className = "check-row";
     if (!panel) row.disabled = true;
     else if (panel.id === selected) row.classList.add("selected");
@@ -805,9 +834,9 @@ function draw() {
   $("#undo").disabled = !past.length;
   $("#redo").disabled = !future.length;
   $("#inspector-title").textContent = panel ? panel.name : "Figure settings";
+  drawEditor(panel);
   drawCanvas();
   drawPanels();
-  drawEditor(panel);
   drawChecks();
   report(bundle || "Working copy · Save to create a .plate bundle");
   const openGroups = new Set([...$("#settings").querySelectorAll("details[open] summary")]
@@ -876,21 +905,57 @@ async function action(name, data = {}) {
       findInterpreters();
     }
     draw();
+    return true;
   }
-  catch (error) { report(error.message); }
+  catch (error) { report(error.message); return false; }
   finally { busy = false; }
 }
 
-$("#add").onclick = async () => {
+async function addPanel(target = selected, edge = "right") {
   const type = $("#panel-type").value;
   const name = `${typeNames[type]} panel`;
-  if (await layout("add", { type, name })) selectPanel(state.project.panels.at(-1).id);
-};
+  if (await layout("add", { type, name, panel: target, edge })) {
+    showChecks = false;
+    selectPanel(state.project.panels.at(-1).id);
+  }
+}
+$("#add").onclick = () => addPanel();
+$("#add").draggable = true;
+$("#add").title = "Click to split the selection, or drag to a target";
+$("#add").ondragstart = event => dragPanel(event, "new");
+$("#add").ondragend = endDrag;
 $("#frame").onclick = event => { if (event.target === $("#frame")) selectPanel(null); };
 $("#undo").onclick = () => history(past, future);
 $("#redo").onclick = () => history(future, past);
-$("#zoom-out").onclick = () => { zoom = Math.max(1, zoom / 1.2); drawCanvas(); };
-$("#zoom-in").onclick = () => { zoom = Math.min(20, zoom * 1.2); drawCanvas(); };
+function setView(mode) { viewMode = mode; drawCanvas(); }
+$("#fit-view").onclick = () => setView("fit");
+$("#actual-size").onclick = () => {
+  if (!state.pixels_per_mm) $("#calibrate").click();
+  else setView("actual");
+};
+$("#zoom-out").onclick = () => { zoom = Math.max(.1, zoom / 1.2); setView("custom"); };
+$("#zoom-in").onclick = () => { zoom = Math.min(25, zoom * 1.2); setView("custom"); };
+new ResizeObserver(() => { if (state && viewMode === "fit") drawCanvas(); }).observe($(".viewport"));
+const calibration = $("#calibration-dialog");
+const scaleInput = $("#calibration-scale");
+scaleInput.oninput = () => {
+  $("#calibration-ruler").style.width = `${50 * scaleInput.valueAsNumber}px`;
+};
+$("#calibrate").onclick = () => {
+  scaleInput.value = calibratedScale();
+  scaleInput.oninput();
+  calibration.showModal();
+};
+$("#cancel-calibrate").onclick = () => calibration.close();
+$("#calibration-form").onsubmit = async event => {
+  event.preventDefault();
+  try {
+    const result = await request("/api/calibrate", { pixels_per_mm: scaleInput.valueAsNumber });
+    state.pixels_per_mm = result.pixels_per_mm;
+    calibration.close();
+    setView("actual");
+  } catch (error) { report(error.message); }
+};
 document.addEventListener("keydown", event => {
   if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "z"
       || event.target.matches("input, textarea, [contenteditable]")) return;
@@ -947,30 +1012,54 @@ $("#reveal-script").onclick = async () => {
   try { report((await request("/api/reveal-script", { panel: panel.id })).path); }
   catch (error) { report(error.message); }
 };
-$("#refresh-all").onclick = () => refresh();
+async function refreshAll() {
+  if (await saveAllDrafts()) refresh();
+}
+$("#refresh-all").onclick = refreshAll;
 document.addEventListener("keydown", event => {
   if (!(event.metaKey || event.ctrlKey) || event.key !== "Enter") return;
   event.preventDefault();
-  if (event.shiftKey) refresh();
+  if (event.shiftKey) refreshAll();
   else if (activeScript()) runSelected();
   else if (selected) refresh([selected]);
 });
-$("#new").onclick = () => action("new");
-$("#open").onclick = () => {
-  const path = prompt("Path to a .plate bundle");
-  if (path) action("open", { path });
-};
-async function saveProject(path, cache = false) {
-  for (const panel of state.project.panels.filter(isScript)) {
-    const draft = drafts.get(panel.id);
-    if (draft && draft.value !== draft.base && !await saveDraft(panel)) return;
-  }
-  await action("save", { path, cache });
+function canSwitchProject() {
+  return ![...drafts.values()].some(draft => draft.value !== draft.base)
+    || confirm("Leave this project with unsaved script edits?");
 }
 
+$("#project-folder").onclick = async () => {
+  try { report((await request("/api/reveal-workspace", {})).path); }
+  catch (error) { report(error.message); }
+};
+$("#new").onclick = () => { if (canSwitchProject()) action("new"); };
+$("#open").onclick = () => {
+  const path = prompt("Path to a .plate bundle");
+  if (path && canSwitchProject()) action("open", { path });
+};
+async function saveAllDrafts() {
+  if (busy) return false;
+  for (const panel of state.project.panels.filter(isScript)) {
+    const draft = drafts.get(panel.id);
+    if (draft && draft.value !== draft.base && !await saveDraft(panel)) return false;
+  }
+  return true;
+}
+
+const saveDialog = $("#save-dialog");
 $("#save").onclick = () => {
-  const path = state.bundle || prompt("Save .plate bundle to this path");
-  if (path) saveProject(path);
+  if (busy) return;
+  $("#bundle-path").value = state.bundle;
+  $("#bundle-cache").checked = Boolean(state.keep_cache);
+  saveDialog.showModal();
+};
+$("#cancel-save").onclick = () => saveDialog.close();
+$("#save-form").onsubmit = async event => {
+  event.preventDefault();
+  if (!await saveAllDrafts()) return;
+  if (await action("save", { path: $("#bundle-path").value, cache: $("#bundle-cache").checked })) {
+    saveDialog.close();
+  }
 };
 $("#project-name").onchange = event => change(p => { p.name = event.target.value.trim() || "Untitled figure"; });
 

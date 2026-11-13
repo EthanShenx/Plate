@@ -103,7 +103,7 @@ def rasterize(data, width_mm, height_mm, format, dpi):
 
 def append_label(document, page, label, rect, style, form, overflow):
     """Append a label within the panel form's resources and coordinate system."""
-    from .fonts import get_font
+    from .fonts import get_font, name_embedded_fonts, write_text
 
     kind, value = document.xref_get_key(form, "Matrix")
     a, _, _, d, e, f = [float(n) for n in value.strip("[]").split()] if kind == "array" else (1, 0, 0, 1, 0, 0)
@@ -127,10 +127,9 @@ def append_label(document, page, label, rect, style, form, overflow):
 
     with pdf.open() as scratch:
         label_page = scratch.new_page(width=rect.width, height=rect.height)
-        writer = pdf.TextWriter(label_page.rect)
-        writer.append((0, size), label, font=font, fontsize=size)
-        writer.write_text(label_page)
+        write_text(label_page, [(0, size, label)], font, size)
         scratch.subset_fonts()
+        name_embedded_fonts(scratch, label_page)
         # Graft the embedded font via a temporary page, then share its reference.
         document.insert_pdf(scratch)
         graft = document[-1]

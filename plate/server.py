@@ -13,15 +13,15 @@ from urllib.parse import urlsplit
 from zipfile import BadZipFile
 
 from .alignment import dependency_signature, fixed_axes, participating, validate_groups
-from .bundle import SAFE_ID, atomic_write, open_bundle, save_bundle, script_path, write_json, write_workspace
+from .bundle import SAFE_ID, asset_path, atomic_write, open_bundle, save_bundle, script_path, write_json, write_workspace
 from .checks import project_checks
-from .layout import Layout, apply
+from .layout import Layout, apply, number
 from .model import Project, SCRIPT_EXTENSIONS, project_from_dict, presets
 from .export import FORMATS, compose_pdf, rasterize
 from .native import native_signature, render_native
 from .fonts import get_font
 from .interpreters import discovery, interpreter, probe
-from .render import render_script, signature
+from .render import data_directory, render_script, signature
 from .style import BUILTINS, ENUMS, PT_PER_MM, TOKENS, content_box, context_for, resolve, validate_style
 from .watcher import Watcher, save_script, sync_scripts
 
@@ -32,19 +32,25 @@ WORKSPACES = Path.home() / "Library/Application Support/Plate/workspaces"
 class Session:
     def __init__(self, bundle=None, workspaces=WORKSPACES):
         self.workspaces = workspaces
+        self.preferences = workspaces.parent / "display.json"
         if not hasattr(self, "lock"):
             self.lock = RLock()
         self.renders = {}
+        self.keep_cache = False
         self.bundle = Path(bundle).resolve() if bundle else None
         if self.bundle:
             self.project, self.workspace = open_bundle(self.bundle, workspaces)
             index = self.workspace / "cache/index.json"
             if index.is_file():
                 self.renders = json.loads(index.read_text())
+                self.keep_cache = True
         else:
             self.project = Project()
             self.workspace = workspaces / self.project.id
             write_workspace(self.project, self.workspace)
+        Layout(self.project)
+        validate_style(self.project)
+        validate_groups(self.project)
 
     def render_state(self, panel, rect, rects=None):
         previous = self.renders.get(panel.id, {})
@@ -56,17 +62,36 @@ class Session:
     def panel_signature(self, panel, rect, rects=None):
         try:
             if panel.type in SCRIPT_EXTENSIONS:
-                if self.project.alignment:
-                    return dependency_signature(self.project, panel, rects or Layout(self.project).rects)
-                return signature(self.project, panel, rect)
+                directory = data_directory(self.project, self.workspace, self.bundle).resolve()
+                previous = self.renders.get(panel.id, {})
+                version = previous.get("interpreter_stamp")
+                if version:
+                    path, stamp = version
+                    try:
+                        if Path(path).stat().st_mtime_ns != stamp:
+                            return None
+                    except OSError:
+                        return None
+                layout_signature = (
+                    dependency_signature(self.project, panel, rects or Layout(self.project).rects)
+                    if self.project.alignment else signature(self.project, panel, rect)
+                )
+                return f"{layout_signature}:{directory}"
             return native_signature(self.project, panel, rect)
         except ValueError:
             return None
 
-    def render_native_panels(self, geometry):
+    def initialize_native_panels(self):
+        geometry = Layout(self.project).rects
         for panel in self.project.panels:
-            if panel.type not in SCRIPT_EXTENSIONS and self.render_state(panel, geometry[panel.id])["state"] == "stale":
+            if panel.type not in SCRIPT_EXTENSIONS and panel.id not in self.renders:
                 self.refresh_panel(panel, geometry[panel.id])
+
+    def display_scale(self):
+        try:
+            return json.loads(self.preferences.read_text()).get("pixels_per_mm")
+        except (OSError, ValueError):
+            return None
 
     def state(self):
         geometry = Layout(self.project).view()
@@ -98,6 +123,8 @@ class Session:
             "geometry": geometry,
             "bundle": str(self.bundle or ""),
             "workspace": str(self.workspace),
+            "keep_cache": self.keep_cache,
+            "pixels_per_mm": self.display_scale(),
             "style_tokens": TOKENS,
             "style_options": ENUMS,
             "palettes": BUILTINS,
@@ -137,6 +164,7 @@ class Session:
             else:
                 result = render_native(self.project, panel, rect, self.workspace)
             self.renders[panel.id] = result
+            result["signature"] = self.panel_signature(panel, rect)
         except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as error:
             logging.getLogger("plate").info("Render failed for %s: %s", panel.id, error)
             self.renders[panel.id] = {
@@ -158,12 +186,13 @@ class Session:
         validate_style(project)
         validate_groups(project)
         for panel in project.panels:
+            if panel.asset:
+                asset_path(self.workspace, panel.asset)
             if panel.type in SCRIPT_EXTENSIONS and not script_path(self.workspace, panel).exists():
                 atomic_write(script_path(self.workspace, panel),
                              lambda tmp: tmp.write_text(panel.script, encoding="utf-8"))
         write_workspace(project, self.workspace, write_scripts=False)
         self.project = project
-        self.render_native_panels(Layout(project).rects)
         return self.state()
 
     def export(self, data):
@@ -174,7 +203,6 @@ class Session:
         if self.bundle and path.resolve() == self.bundle:
             raise ValueError("Choose a separate destination for the export.")
         rects = Layout(self.project).rects
-        self.render_native_panels(rects)
         panels = []
         for panel in self.project.panels:
             previous = self.render_state(panel, rects[panel.id])
@@ -198,12 +226,19 @@ class Session:
 
     def action(self, endpoint, data):
         sync_scripts(self.project, self.workspace)
+        if endpoint == "/api/calibrate":
+            scale = number(data["pixels_per_mm"], "Pixels per millimetre", 1.5, 12)
+            write_json(self.preferences, {"pixels_per_mm": scale})
+            return {"pixels_per_mm": scale}
         if endpoint == "/api/script":
             source = data["script"]
             if not isinstance(source, str):
                 raise ValueError("Script must be text.")
             result = save_script(self.project, self.workspace, data["panel"], source, data["base"])
             return result if result["conflict"] else self.state()
+        if endpoint == "/api/reveal-workspace":
+            subprocess.run(["/usr/bin/open", str(self.workspace)], check=True, timeout=5)
+            return {"path": str(self.workspace)}
         if endpoint == "/api/reveal-script":
             panel = next(panel for panel in self.project.panels if panel.id == data["panel"])
             path = script_path(self.workspace, panel)
@@ -226,7 +261,10 @@ class Session:
             record = next(item for item in project["panels"] if item["id"] == panel.id)
             record["asset"] = asset
             record["settings"]["filename"] = path.name
-            return self.update(project)
+            self.update(project)
+            panel = next(item for item in self.project.panels if item.id == panel.id)
+            self.refresh_panel(panel, Layout(self.project).rects[panel.id])
+            return self.state()
         if endpoint == "/api/style-json":
             result = resolve(self.project)
             result["size_mm"] = [self.project.size.width_mm, self.project.size.height_mm]
@@ -258,8 +296,10 @@ class Session:
         if endpoint == "/api/new":
             self.__init__(workspaces=self.workspaces)
         elif endpoint == "/api/open":
-            self.__init__(Path(data["path"]).expanduser(), self.workspaces)
-            self.render_native_panels(Layout(self.project).rects)
+            loaded = Session(Path(data["path"]).expanduser(), self.workspaces)
+            self.project, self.workspace, self.bundle = loaded.project, loaded.workspace, loaded.bundle
+            self.renders, self.keep_cache = loaded.renders, loaded.keep_cache
+            self.initialize_native_panels()
         elif endpoint == "/api/save":
             path = Path(data["path"]).expanduser() if data.get("path") else self.bundle
             if not path:
@@ -270,6 +310,7 @@ class Session:
                 write_json(self.workspace / "cache/index.json", self.renders)
             save_bundle(self.project, self.workspace, path, data.get("cache", False), write_scripts=False)
             self.bundle = path.resolve()
+            self.keep_cache = bool(data.get("cache"))
         else:
             raise ValueError("Unknown project action.")
         return self.state()
@@ -335,7 +376,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send(file.read_bytes(), mimetypes.guess_type(file)[0] or "application/octet-stream")
 
     def do_POST(self):
-        if (not self.allowed()):
+        if not self.allowed():
             return
         if (self.headers.get("Origin") != f"http://{self.address()}"
                 or self.headers.get_content_type() != "application/json"):
@@ -368,7 +409,7 @@ class PlateServer(ThreadingHTTPServer):
 def make_server(bundle=None, workspaces=WORKSPACES):
     server = PlateServer(("127.0.0.1", 0), Handler)
     server.session = Session(bundle, workspaces)
-    server.session.render_native_panels(Layout(server.session.project).rects)
+    server.session.initialize_native_panels()
     server.watcher = Watcher(server.session)
     server.watcher.start()
     return server

@@ -13,7 +13,7 @@ import pymupdf as pdf
 
 from .bundle import atomic_write, write_json
 from .export import flatten_placement
-from .fonts import get_font
+from .fonts import get_font, name_embedded_fonts, write_text
 from .interpreters import login_path
 from .render import make_preview, pdf_metadata
 from .style import PT_PER_MM, context_for
@@ -47,7 +47,7 @@ def raster_page(page, path, settings):
     x, y, w, h = settings.get("crop") or (0, 0, 1, 1)
     clip = pdf.Rect(target.x0 + x*target.width, target.y0 + y*target.height,
                     target.x0 + (x+w)*target.width, target.y0 + (y+h)*target.height) & page.rect
-    if not clip.contains(target):
+    if clip != page.rect and not clip.contains(target):
         for ref in set(page.get_contents()) - before:
             body = page.parent.xref_stream(ref)
             page.parent.update_stream(ref, f"q {clip.x0:.8f} {page.rect.height-clip.y1:.8f} "
@@ -117,7 +117,7 @@ def text_panel(page, panel, style):
     font = get_font(style["font_family"])
     size = style["annotation_pt" if panel.settings.get("role") == "annotation" else "font_main_pt"]
     align = panel.settings.get("align", "left")
-    writer = pdf.TextWriter(page.rect)
+    lines = []
     margin = 2 * PT_PER_MM
     y = margin + font.ascender * size
     for line in wrapped_lines(panel.settings.get("text", ""), font, size, max(1, page.rect.width - 2*margin)):
@@ -125,9 +125,10 @@ def text_panel(page, panel, style):
         x = {"left": margin, "center": (page.rect.width - span)/2,
              "right": page.rect.width - span - margin}.get(align, margin)
         if line:
-            writer.append((x, y), line, font=font, fontsize=size)
+            lines.append((x, y, line))
         y += 1.25 * size
-    writer.write_text(page)
+    if lines:
+        write_text(page, lines, font, size)
 
 
 def legend_panel(page, panel, context):
@@ -137,7 +138,7 @@ def legend_panel(page, panel, context):
     shape = panel.settings.get("swatch", "patch")
     size = style["legend_text_pt"]
     font = get_font(style["font_family"])
-    writer = pdf.TextWriter(page.rect)
+    lines = []
     margin = 2 * PT_PER_MM
     x, y = margin, margin + font.ascender * size
     for key in keys:
@@ -154,16 +155,17 @@ def legend_panel(page, panel, context):
             page.draw_circle((x+size/2, y-size*.35), style["marker_size_pt"]/2, color=None, fill=color)
         else:
             page.draw_rect(pdf.Rect(x, y-size*.75, x+size, y), color=None, fill=color)
-        writer.append((x+size*1.4, y), key, font=font, fontsize=size)
+        lines.append((x+size*1.4, y, key))
         if direction == "horizontal":
             x += width + size
         else:
             y += size * 1.65
-    writer.write_text(page)
+    if lines:
+        write_text(page, lines, font, size)
 
 
 def native_signature(project, panel, rect):
-    data = (2, panel.type, panel.settings, panel.asset, context_for(project, panel, rect))
+    data = (4, panel.type, panel.settings, panel.asset, context_for(project, panel, rect))
     return sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 
@@ -189,7 +191,14 @@ def render_native(project, panel, rect, workspace):
             text_panel(page, panel, context["style"])
         elif panel.type == "legend":
             legend_panel(page, panel, context)
-        document.subset_fonts()
+        if not page.get_contents():
+            stream = document.get_new_xref()
+            document.update_object(stream, "<<>>")
+            document.update_stream(stream, b"q Q\n")
+            page.set_contents(stream)
+        if panel.type in {"text", "legend"}:
+            document.subset_fonts()
+            name_embedded_fonts(document, page)
         atomic_write(output, lambda tmp: tmp.write_bytes(document.tobytes(garbage=4, deflate=True)))
     metadata = pdf_metadata(output)
     make_preview(output, preview)

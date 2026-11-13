@@ -48,14 +48,21 @@ def apply_style(style, palette):
     else:
         sns.set_palette(palette)
     mpl.rcParams.update(params)
-    annotate = Axes.annotate
+    annotate, text = Axes.annotate, Axes.text
 
     def annotation(self, *args, **kwargs):
         if not any(key in kwargs for key in ("size", "fontsize", "fontproperties")):
             kwargs["fontsize"] = style["annotation_pt"]
         return annotate(self, *args, **kwargs)
 
+    def axes_text(self, *args, **kwargs):
+        fontdict = args[3] if len(args) > 3 else kwargs.get("fontdict") or {}
+        if not any(key in kwargs or key in fontdict for key in ("size", "fontsize", "fontproperties")):
+            kwargs["fontsize"] = style["annotation_pt"]
+        return text(self, *args, **kwargs)
+
     Axes.annotate = annotation
+    Axes.text = axes_text
 
 
 def outer_axes(fig):
@@ -98,8 +105,9 @@ def main():
                                box.width*sx, box.height*sy])
         fig.canvas.draw()
         bounds = outer_axes(fig)
-    fig.savefig(output, format="pdf", bbox_inches=None, dpi=300,
-                transparent=context["inject"] and style["background"] == "none")
+    with mpl.rc_context({"savefig.bbox": None, "pdf.fonttype": 42}):
+        fig.savefig(output, format="pdf", bbox_inches=None, dpi=300,
+                    transparent=context["inject"] and style["background"] == "none")
     Path(metadata).write_text(json.dumps({"axes": bounds}))
 
 

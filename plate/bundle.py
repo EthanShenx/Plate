@@ -9,7 +9,7 @@ import shutil
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from .model import SCHEMA_VERSION, SCRIPT_EXTENSIONS, project_from_dict
+from .model import SCHEMA_VERSION, SCRIPT_EXTENSIONS, new_id, project_from_dict
 
 SAFE_ID = re.compile(r"[A-Za-z0-9_-]{1,80}\Z")
 
@@ -70,6 +70,13 @@ def migrate(manifest):
     return manifest
 
 
+def asset_path(workspace, value):
+    asset = PurePosixPath(value)
+    if len(asset.parts) != 2 or asset.parts[0] != "assets" or asset.name == ".." or "\\" in value:
+        raise ValueError("Invalid asset location.")
+    return workspace / asset
+
+
 def read_workspace(workspace):
     def read(path):
         return json.loads(path.read_text(encoding="utf-8"))
@@ -89,9 +96,7 @@ def read_workspace(workspace):
             panel["script"] = (folder / f"script.{SCRIPT_EXTENSIONS[panel['type']]}").read_text(
                 encoding="utf-8")
         if panel.get("asset"):
-            asset = PurePosixPath(panel["asset"])
-            if len(asset.parts) != 2 or asset.parts[0] != "assets" or asset.name == "..":
-                raise ValueError("Invalid asset location.")
+            asset_path(workspace, panel["asset"])
         manifest["panels"].append(panel)
     for key in ("layout", "style", "palettes"):
         path = workspace / f"{key}.json"
@@ -121,7 +126,6 @@ def open_bundle(path, workspaces):
         project = read_workspace(unpacked)
         workspace = workspaces / project.id
         if workspace.exists():
-            from .model import new_id
             workspace = workspaces / f"{project.id}-{new_id()}"
         unpacked.rename(workspace)
     return project, workspace
@@ -135,7 +139,7 @@ def save_bundle(project, workspace, path, include_cache=False, write_scripts=Tru
         if panel.type in SCRIPT_EXTENSIONS:
             files.append(script_path(workspace, panel))
         if panel.asset:
-            files.append(workspace / panel.asset)
+            files.append(asset_path(workspace, panel.asset))
     if include_cache:
         files.extend(path for path in (workspace / "cache").rglob("*") if path.is_file())
 

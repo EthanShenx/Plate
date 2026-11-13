@@ -11,3 +11,5 @@
 - Native raster cover and user crops are placement and clipping operations. Original pixel dimensions survive PDF composition, including for image formats decoded into a lossless PNG before embedding.
 - CodeMirror 6 uses its Python grammar and legacy R mode. A server-side polling watcher handles external editors that save by rename. Script saves compare the editor base against disk so layout and style changes cannot overwrite external edits.
 - Alignment intersects measured plot areas in absolute figure coordinates. Matplotlib repositions its axes, and ggplot2 or patchwork adds physical gtable tracks around the plot without changing text sizes. Base R uses par(plt). Impossible or unmeasurable groups raise an advisory warning.
+- Screen calibration is stored beside the workspace directory so it survives the random port changing. A browser localStorage setting would reset on each launch.
+- Illustrator resolves the installed PostScript names ArialMT and Arial-BoldMT. Native text uses those names and simple encoding for printable ASCII, with a Unicode path for other text. The earlier MuPDF display names caused Illustrator to substitute fonts.

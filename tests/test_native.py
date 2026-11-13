@@ -34,6 +34,7 @@ class NativePanels(unittest.TestCase):
                 source.save(path)
             session.action("/api/asset", {"path": str(path), "panel": project["panels"][3]["id"]})
 
+            session.refresh([panel.id for panel in session.project.panels])
             result = session.export({"path": str(root / "export.pdf"), "format": "pdf"})
             with pymupdf.open(result["path"]) as exported:
                 page = exported[0]

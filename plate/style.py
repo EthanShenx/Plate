@@ -1,6 +1,7 @@
 """Resolve physical style tokens and the panel's plotting box."""
 
 import json
+import re
 
 from .model import ROOT
 
@@ -62,7 +63,6 @@ ENUMS = {
 
 
 def validate_style(project):
-    import re
     from .layout import number
 
     def color(value):

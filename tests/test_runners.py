@@ -69,6 +69,29 @@ class Runners(unittest.TestCase):
                     self.assertTrue(any(abs(width - target) <= .02 for width in widths), widths)
                 self.assertAlmostEqual(pdf[0].rect.width, rect["w"] * PT_PER_MM, delta=.028)
 
+    def test_base_r_round_trip(self):
+        executable = shutil.which("Rscript")
+        if not executable or probe(executable, "script-r")["missing"]:
+            self.skipTest("Rscript or R plotting packages unavailable")
+        panel = Panel(type="script-r", interpreter=executable, script="""
+plot(c(0, 1), c(0, 1), type="l", xlab="Dose", ylab="Response")
+text(.5, .25, "Annotation")
+""")
+        project = Project(panels=[panel], layout=leaf(panel.id),
+                          style={"axis_title_pt": 8, "annotation_pt": 6, "tick_width_pt": .4})
+        with TemporaryDirectory() as scratch:
+            workspace = Path(scratch)
+            write_workspace(project, workspace)
+            rect = Layout(project).rects[panel.id]
+            result = render_script(project, panel, rect, workspace, None)
+            spans = {item["text"]: item for item in result["metadata"]["text"]}
+            for name, size in {"Dose": 8, "Response": 8, "Annotation": 6}.items():
+                self.assertAlmostEqual(spans[name]["size"], size, delta=.05)
+            with pymupdf.open(workspace / "cache" / f"{result['key']}.pdf") as pdf:
+                widths = [item["width"] for item in pdf[0].get_drawings() if item["width"]]
+                for target in (.5, .75, .4):
+                    self.assertTrue(any(abs(width - target) <= .02 for width in widths), widths)
+
     def test_python_round_trip(self):
         self.round_trip("script-py", sys.executable, PYTHON)
 
