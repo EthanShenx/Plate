@@ -1,0 +1,8 @@
+Package: plate
+Title: Plate Figure Script Context
+Version: 0.1.0
+Authors@R: person("Plate", "Contributors", role = c("aut", "cre"), email = "plate@example.org")
+Description: Exposes physical size, plot styling and semantic colours from Plate figure projects.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Imports: jsonlite

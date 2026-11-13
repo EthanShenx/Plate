@@ -5,14 +5,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
 import mimetypes
+import subprocess
 from pathlib import Path
 from threading import RLock
 from urllib.parse import urlsplit
 from zipfile import BadZipFile
 
-from .bundle import open_bundle, save_bundle, write_workspace
+from .bundle import SAFE_ID, open_bundle, save_bundle, write_json, write_workspace
 from .layout import Layout, apply
-from .model import Project, project_from_dict, presets
+from .model import Project, SCRIPT_EXTENSIONS, project_from_dict, presets
+from .interpreters import discovery, interpreter, probe
+from .render import render_script, signature
+from .style import TOKENS
 
 WEB = Path(__file__).parent / "web"
 WORKSPACES = Path.home() / "Library/Application Support/Plate/workspaces"
@@ -22,21 +26,69 @@ class Session:
     def __init__(self, bundle=None, workspaces=WORKSPACES):
         self.workspaces = workspaces
         self.lock = RLock()
+        self.renders = {}
         self.bundle = Path(bundle).resolve() if bundle else None
         if self.bundle:
             self.project, self.workspace = open_bundle(self.bundle, workspaces)
+            index = self.workspace / "cache/index.json"
+            if index.is_file():
+                self.renders = json.loads(index.read_text())
         else:
             self.project = Project()
             self.workspace = workspaces / self.project.id
             write_workspace(self.project, self.workspace)
 
+    def render_state(self, panel, rect):
+        previous = self.renders.get(panel.id, {})
+        if panel.type not in SCRIPT_EXTENSIONS:
+            return {}
+        try:
+            fresh = previous.get("signature") == signature(self.project, panel, rect)
+        except ValueError:
+            fresh = False
+        if fresh or not previous or previous.get("invalid_box") and not self.valid_box(panel, rect):
+            return {"state": "stale", **previous}
+        return {**previous, "state": "stale"}
+
     def state(self):
+        geometry = Layout(self.project).view()
         return {
             "project": asdict(self.project),
-            "geometry": Layout(self.project).view(),
+            "geometry": geometry,
             "bundle": str(self.bundle or ""),
             "workspace": str(self.workspace),
+            "style_tokens": TOKENS,
+            "renders": {panel.id: self.render_state(panel, geometry["rects"][panel.id])
+                        for panel in self.project.panels},
         }
+
+    def refresh(self, panel_ids):
+        geometry = Layout(self.project).rects
+        for panel in self.project.panels:
+            if panel.id not in panel_ids or panel.type not in SCRIPT_EXTENSIONS:
+                continue
+            rect = geometry[panel.id]
+            try:
+                self.renders[panel.id] = render_script(
+                    self.project, panel, rect, self.workspace, self.bundle)
+            except (ValueError, OSError, subprocess.SubprocessError) as error:
+                logging.getLogger("plate").info("Render failed for %s: %s", panel.id, error)
+                valid_box = self.valid_box(panel, rect)
+                self.renders[panel.id] = {
+                    **self.renders.get(panel.id, {}), "state": "error",
+                    "invalid_box": not valid_box,
+                    "signature": signature(self.project, panel, rect) if valid_box else None,
+                    "error": str(error), "stdout": getattr(error, "stdout", ""),
+                    "stderr": getattr(error, "stderr", ""),
+                }
+        write_json(self.workspace / "cache/index.json", self.renders)
+
+    def valid_box(self, panel, rect):
+        try:
+            signature(self.project, panel, rect)
+        except ValueError:
+            return False
+        return True
 
     def update(self, data):
         project = project_from_dict(data)
@@ -48,6 +100,19 @@ class Session:
         return self.state()
 
     def action(self, endpoint, data):
+        if endpoint == "/api/refresh":
+            requested = data.get("panels")
+            if requested is None:
+                geometry = Layout(self.project).rects
+                requested = [panel.id for panel in self.project.panels
+                             if self.render_state(panel, geometry[panel.id]).get("state") in {"stale", "error"}]
+            self.refresh(requested)
+            return self.state()
+        if endpoint == "/api/interpreters":
+            return discovery(data.get("venvs", []))
+        if endpoint == "/api/dependencies":
+            panel = next(panel for panel in self.project.panels if panel.id == data["panel"])
+            return probe(interpreter(self.project, panel), panel.type, refresh=True)
         if endpoint == "/api/layout":
             return self.update(asdict(apply(self.project, data)))
         if endpoint == "/api/project":
@@ -96,7 +161,18 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed():
             return
         path = urlsplit(self.path).path
-        if path == "/api/project":
+        if path.startswith("/preview/"):
+            key = path.removeprefix("/preview/")
+            if len(key) != 64 or not SAFE_ID.fullmatch(key):
+                self.send_error(404)
+                return
+            with self.server.session.lock:
+                preview = self.server.session.workspace / "cache" / f"{key}.png"
+                if not preview.is_file():
+                    self.send_error(404)
+                    return
+                self.send(preview.read_bytes(), "image/png")
+        elif path == "/api/project":
             with self.server.session.lock:
                 self.json(self.server.session.state())
         elif path == "/api/presets":
@@ -123,7 +199,7 @@ class Handler(BaseHTTPRequestHandler):
             with self.server.session.lock:
                 result = self.server.session.action(urlsplit(self.path).path, data)
             self.json(result)
-        except (ValueError, TypeError, KeyError, OSError, BadZipFile) as error:
+        except (ValueError, TypeError, KeyError, OSError, BadZipFile, StopIteration, subprocess.SubprocessError) as error:
             self.json({"error": str(error)}, 400)
 
     def log_message(self, format, *args):

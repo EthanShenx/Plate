@@ -199,7 +199,13 @@ function drawCanvas() {
       tile.draggable = true;
       const caption = document.createElement("span");
       caption.className = "tile-caption";
-      tile.append(caption);
+      const preview = document.createElement("img");
+      preview.className = "plot-preview";
+      preview.alt = "";
+      preview.draggable = false;
+      const badge = document.createElement("span");
+      badge.className = "render-badge";
+      tile.append(caption, preview, badge);
       for (const edge of [...edgeNames, "center"]) dropZone(tile, edge, panel.id);
       tile.onclick = () => selectPanel(panel.id);
       tile.onkeydown = event => {
@@ -212,6 +218,15 @@ function drawCanvas() {
     }
     tile.classList.toggle("selected", panel.id === selected);
     tile.querySelector(".tile-caption").textContent = panel.name;
+    const render = state.renders[panel.id];
+    const image = tile.querySelector(".plot-preview");
+    const src = render?.key ? `/preview/${render.key}` : "";
+    if (src && image.getAttribute("src") !== src) image.src = src;
+    image.hidden = !src;
+    tile.querySelector(".tile-caption").hidden = !!src;
+    const badge = tile.querySelector(".render-badge");
+    badge.textContent = render?.state || "";
+    badge.dataset.state = render?.state || "";
     rectangle(tile, geometry.rects[panel.id]);
   }
   for (const [key, handle] of Object.entries(geometry.handles)) frame.append(resizeHandle(key, handle));
@@ -235,8 +250,12 @@ function drawCanvas() {
 function drawPanels() {
   const list = $("#panel-list");
   list.replaceChildren(...state.project.panels.map(panel => {
+    const render = state.renders[panel.id];
     const row = button(panel.name, () => selectPanel(panel.id));
     row.className = "panel-row";
+    const meta = document.createElement("small");
+    meta.textContent = [panel.type === "script-r" ? "R" : "Python", render?.state].filter(Boolean).join(" · ");
+    row.append(meta);
     row.classList.toggle("selected", panel.id === selected);
     row.draggable = true;
     row.ondragstart = event => dragPanel(event, panel.id);
@@ -257,6 +276,34 @@ function drawPanels() {
   }));
 }
 
+function editPanel(panel, mutate) {
+  return change(project => mutate(project.panels.find(item => item.id === panel.id)));
+}
+
+function stringField(caption, value, onChange, type = "text") {
+  const input = document.createElement("input");
+  Object.assign(input, { type, value });
+  input.onchange = () => onChange(input.value);
+  return field(caption, input);
+}
+
+async function refresh(ids) {
+  if (busy) return;
+  const panels = ids || state.project.panels.filter(
+    item => ["stale", "error"].includes(state.renders[item.id]?.state)).map(item => item.id);
+  if (!panels.length) return;
+  const previous = state.renders;
+  state.renders = { ...previous };
+  for (const id of panels) state.renders[id] = { ...previous[id], state: "rendering" };
+  drawCanvas();
+  drawPanels();
+  if (!await commit("/api/refresh", { panels }, false)) {
+    state.renders = previous;
+    drawCanvas();
+    drawPanels();
+  }
+}
+
 function drawPanelInspector(panel) {
   const {x, y, w, h} = state.geometry.rects[panel.id];
   const dimensions = Object.entries({x, y, w, h}).map(([key, value]) =>
@@ -268,8 +315,30 @@ function drawPanelInspector(panel) {
     box.onchange = () => layout("lock", { field: key, enabled: box.checked });
     return field(key === "w" ? "Lock width" : "Lock height", box);
   });
+  const script = document.createElement("textarea");
+  script.rows = 9;
+  script.value = panel.script;
+  script.spellcheck = false;
+  const render = state.renders[panel.id] || {};
+  const output = document.createElement("pre");
+  output.className = "console";
+  output.textContent = [render.error, render.stdout, render.stderr, ...(render.warnings || [])]
+    .filter(Boolean).join("\n");
   $("#settings").replaceChildren(...dimensions, ...locks,
-    button("Delete panel", () => layout("delete")));
+    stringField("Interpreter override", panel.interpreter, value => editPanel(panel, p => { p.interpreter = value; })),
+    field("Plot script", script),
+    button("Refresh panel", async () => {
+      if (script.value !== panel.script && !await editPanel(panel, p => { p.script = script.value; })) return;
+      refresh([panel.id]);
+    }),
+    button("Check dependencies", async () => {
+      try {
+        const info = await request("/api/dependencies", { panel: panel.id });
+        output.textContent = info.missing.length ? `Missing ${info.missing.join(", ")}\n${info.install}` :
+          `${info.path} · ${info.version}\nRequired packages are available.`;
+      } catch (error) { output.textContent = error.message; }
+    }),
+    output, button("Delete panel", () => layout("delete")));
 }
 
 function draw() {
@@ -304,7 +373,13 @@ function draw() {
   height.onchange = () => change(p => { if (height.validity.valid) p.size.height_mm = height.valueAsNumber; });
   $("#settings").replaceChildren(field("Journal width", preset), field("Height (mm)", height));
   $("#settings").append(numeric("Minimum panel size (mm)", project.size.minimum_mm,
-    value => change(p => { p.size.minimum_mm = value; }), 1));
+    value => change(p => { p.size.minimum_mm = value; }), 1),
+    stringField("Data root", project.data_root, value => change(p => { p.data_root = value; })),
+    numeric("Render timeout (seconds)", project.timeout_s, value => change(p => { p.timeout_s = value; }), 1),
+    ...["script-r", "script-py"].map(type =>
+      stringField(type === "script-r" ? "Default Rscript" : "Default Python", project.interpreters[type] || "",
+        value => change(p => { p.interpreters[type] = value; }))));
+
 }
 
 async function action(name, data = {}) {
@@ -337,6 +412,13 @@ document.addEventListener("keydown", event => {
   else history(past, future);
 });
 
+$("#refresh-all").onclick = () => refresh();
+document.addEventListener("keydown", event => {
+  if (!(event.metaKey || event.ctrlKey) || event.key !== "Enter") return;
+  event.preventDefault();
+  if (event.shiftKey) refresh();
+  else if (selected) refresh([selected]);
+});
 $("#new").onclick = () => action("new");
 $("#open").onclick = () => {
   const path = prompt("Path to a .plate bundle");

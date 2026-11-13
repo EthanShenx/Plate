@@ -71,3 +71,12 @@ footer { padding: 7px 16px; border-top: 1px solid var(--line); min-height: 27px;
 .drop-zone.frame-zone.left, .drop-zone.frame-zone.right { width: 10px; }
 .drop-zone.frame-zone.top, .drop-zone.frame-zone.bottom { height: 10px; inset-inline: 0; }
 @media (prefers-reduced-motion: reduce) { .tile { transition: none; } }
+.panel-row small { display: block; font-size: 10px; color: var(--muted); margin-top: 2px; }
+.plot-preview { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; background: white; }
+[hidden] { display: none !important; }
+.render-badge { position: absolute; top: 4px; right: 4px; padding: 2px 4px; font: 10px "IBM Plex Mono", monospace; border-radius: 3px; background: #fff3d6; color: #735220; pointer-events: none; }
+.render-badge[data-state="fresh"], .render-badge:empty { display: none; }
+.render-badge[data-state="error"] { background: #ffdfdf; color: #8b1b1b; }
+.render-badge[data-state="rendering"] { background: #dfeee8; color: var(--accent); }
+.console { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
+.field textarea { resize: vertical; font: 12px "IBM Plex Mono", monospace; }

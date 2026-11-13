@@ -1,0 +1,15 @@
+{
+  "style": {
+    "font_family": "Arial", "font_main_pt": 7, "font_min_pt": 5,
+    "axis_title_pt": null, "tick_label_pt": null, "legend_title_pt": null,
+    "legend_text_pt": null, "annotation_pt": null, "panel_label_pt": 8,
+    "panel_label_weight": "bold",
+    "line_data_pt": 0.75, "line_axis_pt": 0.5,
+    "tick_length_pt": 2.5, "tick_width_pt": 0.5, "tick_direction": "out",
+    "marker_size_pt": 4, "spines": "left-bottom", "grid": "none", "background": "none",
+    "gutter_mm": 3, "margin_mm": 4, "label_reserve_mm": 5,
+    "label_offset_x_mm": 0.8, "label_offset_y_mm": 0.5, "collapse_empty_labels": true
+  },
+  "palette": ["#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7"],
+  "colors": {}, "size_mm": [89, 60]
+}
