@@ -95,3 +95,11 @@ details button { margin: 2px 3px 3px 0; font-size: 11px; }
 .swatches { display: flex; gap: 2px; height: 16px; margin: 6px 0 8px; }
 .swatches span { flex: 1; border-radius: 2px; }
 h3 { font-size: 12px; }
+.inspector-tabs { display: flex; gap: 4px; margin-bottom: 13px; }
+.inspector-tabs button { background: transparent; border-color: transparent; font-size: 12px; }
+.inspector-tabs [aria-pressed="true"] { color: var(--accent); border-color: #aec8b7; background: #e9f1e7; }
+.check-row { display: block; width: 100%; text-align: left; overflow-wrap: anywhere; margin-bottom: 5px; font-size: 12px; }
+.check-row small { display: block; color: var(--muted); margin-bottom: 2px; }
+.check-row.selected { border-color: var(--accent); }
+.highlights { position: absolute; inset: 0; pointer-events: none; }
+.highlights span { position: absolute; outline: 1px solid #b56621; background: #e1a46522; }

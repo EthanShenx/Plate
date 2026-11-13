@@ -2,6 +2,7 @@
 
 from hashlib import sha256
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -42,7 +43,13 @@ def pdf_metadata(path):
                 for span in line["spans"]:
                     if span["text"].strip():
                         text.append({key: span[key] for key in ("text", "font", "size", "bbox")})
-        return {"text": text, "page_pt": [page.rect.width, page.rect.height]}
+        dpi = []
+        for image in page.get_image_info():
+            a, b, c, d, _, _ = image["transform"]
+            w, h = math.hypot(a, b), math.hypot(c, d)
+            if w and h:
+                dpi.append(min(image["width"] * 72 / w, image["height"] * 72 / h))
+        return {"text": text, "page_pt": [page.rect.width, page.rect.height], "effective_dpi": dpi}
 
 
 def normalize_r_pdf(path, size_mm):

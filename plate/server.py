@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 from zipfile import BadZipFile
 
 from .bundle import SAFE_ID, atomic_write, open_bundle, save_bundle, write_json, write_workspace
+from .checks import project_checks
 from .layout import Layout, apply
 from .model import Project, SCRIPT_EXTENSIONS, project_from_dict, presets
 from .export import FORMATS, compose_pdf, rasterize
@@ -53,6 +54,8 @@ class Session:
 
     def state(self):
         geometry = Layout(self.project).view()
+        renders = {panel.id: self.render_state(panel, geometry["rects"][panel.id])
+                   for panel in self.project.panels}
         return {
             "project": asdict(self.project),
             "geometry": geometry,
@@ -61,8 +64,8 @@ class Session:
             "style_tokens": TOKENS,
             "style_options": ENUMS,
             "palettes": BUILTINS,
-            "renders": {panel.id: self.render_state(panel, geometry["rects"][panel.id])
-                        for panel in self.project.panels},
+            "renders": renders,
+            "checks": project_checks(self.project, renders, presets(), resolve),
         }
 
     def refresh(self, panel_ids):

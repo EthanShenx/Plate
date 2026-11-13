@@ -6,6 +6,7 @@ let zoom = 3.1;
 let past = [];
 let future = [];
 let busy = false;
+let showChecks = false;
 let dragged = null;
 const panels = new Map();
 const edgeNames = ["left", "right", "top", "bottom"];
@@ -205,7 +206,9 @@ function drawCanvas() {
       preview.draggable = false;
       const badge = document.createElement("span");
       badge.className = "render-badge";
-      tile.append(caption, preview, badge);
+      const highlights = document.createElement("div");
+      highlights.className = "highlights";
+      tile.append(caption, preview, highlights, badge);
       for (const edge of [...edgeNames, "center"]) dropZone(tile, edge, panel.id);
       tile.onclick = () => selectPanel(panel.id);
       tile.onkeydown = event => {
@@ -227,6 +230,16 @@ function drawCanvas() {
     const badge = tile.querySelector(".render-badge");
     badge.textContent = render?.state || "";
     badge.dataset.state = render?.state || "";
+    const highlights = state.checks.filter(check => check.panel === panel.id && check.bbox)
+      .map(check => {
+        const node = document.createElement("span");
+        const [x0, y0, x1, y1] = check.bbox;
+        const [w, h] = check.page_pt;
+        Object.assign(node.style, { left: `${x0 / w * 100}%`, top: `${y0 / h * 100}%`,
+          width: `${(x1 - x0) / w * 100}%`, height: `${(y1 - y0) / h * 100}%` });
+        return node;
+      });
+    tile.querySelector(".highlights").replaceChildren(...highlights);
     rectangle(tile, geometry.rects[panel.id]);
   }
   for (const [key, handle] of Object.entries(geometry.handles)) frame.append(resizeHandle(key, handle));
@@ -540,6 +553,31 @@ function drawPanelInspector(panel) {
     output, drawOverrides(panel), button("Delete panel", () => layout("delete")));
 }
 
+function drawChecks() {
+  $("#show-inspector").setAttribute("aria-pressed", String(!showChecks));
+  $("#show-checks").setAttribute("aria-pressed", String(showChecks));
+  $("#show-checks").textContent = `Checks${state.checks.length ? ` · ${state.checks.length}` : ""}`;
+  $("#settings").hidden = showChecks;
+  $("#inspector-title").hidden = showChecks;
+  $("#checks").hidden = !showChecks;
+  if (!showChecks) return;
+  if (!state.checks.length) {
+    $("#checks").textContent = "No warnings.";
+    return;
+  }
+  $("#checks").replaceChildren(...state.checks.map(check => {
+    const panel = state.project.panels.find(item => item.id === check.panel);
+    const row = button(check.message, () => { if (panel) selectPanel(panel.id); });
+    row.className = "check-row";
+    if (!panel) row.disabled = true;
+    else if (panel.id === selected) row.classList.add("selected");
+    const title = document.createElement("small");
+    title.textContent = panel?.name || "Figure";
+    row.prepend(title);
+    return row;
+  }));
+}
+
 function draw() {
   const { project, bundle } = state;
   const panel = project.panels.find(item => item.id === selected);
@@ -551,6 +589,7 @@ function draw() {
   $("#inspector-title").textContent = panel ? panel.name : "Figure settings";
   drawCanvas();
   drawPanels();
+  drawChecks();
   report(bundle || "Working copy · Save to create a .plate bundle");
   const openGroups = new Set([...$("#settings").querySelectorAll("details[open] summary")]
     .map(summary => summary.textContent));
@@ -632,12 +671,19 @@ document.addEventListener("keydown", event => {
   else history(past, future);
 });
 
+$("#show-inspector").onclick = () => { showChecks = false; drawChecks(); };
+$("#show-checks").onclick = () => { showChecks = true; drawChecks(); };
+
 const exportDialog = $("#export-dialog");
 $("#export-format").onchange = () => { $("#dpi-field").hidden = $("#export-format").value === "pdf"; };
 $("#export").onclick = () => {
   if (busy) return;
-  const stale = Object.values(state.renders).filter(item => item.state && item.state !== "fresh").length;
-  $("#export-warnings").textContent = stale ? `${stale} panel(s) need refresh. The PDF will use available renders.` : "";
+  const descriptions = { "font-size": "small text", "font-family": "font mismatch", "raster-dpi": "low dpi",
+    stale: "stale", "render-error": "render error", preset: "provisional preset", "script-path": "absolute path" };
+  const counts = {};
+  for (const item of state.checks) counts[item.kind] = (counts[item.kind] || 0) + 1;
+  $("#export-warnings").textContent = Object.entries(counts)
+    .map(([key, count]) => `${count} ${descriptions[key]}`).join(" · ");
   $("#export-path").value = state.bundle.replace(/\.plate$/i, ".pdf");
   $("#export-format").onchange();
   exportDialog.showModal();
