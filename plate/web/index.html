@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Plate · Figure workspace</title>
+  <link rel="stylesheet" href="/plate.css">
+</head>
+<body>
+<header class="toolbar">
+  <span class="brand"><i aria-hidden="true"></i>Plate</span>
+  <input id="project-name" aria-label="Project name">
+  <div class="spacer"></div>
+  <button id="new">New</button><button id="open">Open</button><button id="save">Save</button>
+</header>
+<main>
+  <aside class="navigator"><h2>Panels</h2><div id="panel-list"></div></aside>
+  <section class="stage" aria-label="Figure canvas">
+    <div class="stage-bar"><span id="measure"></span></div>
+    <div class="viewport"><div id="frame"></div></div>
+  </section>
+  <aside class="inspector"><h2>Figure settings</h2><div id="settings"></div></aside>
+</main>
+<footer id="status" role="status"></footer>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

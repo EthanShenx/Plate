@@ -1,0 +1,22 @@
+[
+  {
+    "id": "nature", "name": "Nature", "widths": [89, 120, 136, 183],
+    "max_height_mm": 170, "page_depth_mm": 247, "verified": true,
+    "source_url": "https://www.nature.com/nature/for-authors/final-submission",
+    "guide_url": "https://research-figure-guide.nature.com/figures/building-and-exporting-figure-panels/"
+  },
+  {
+    "id": "cell", "name": "Cell Press (two column)", "widths": [85, 114, 174],
+    "verified": false, "source_url": "https://www.cell.com/figureguidelines"
+  },
+  {
+    "id": "pnas", "name": "PNAS", "widths": [87, 114, 178],
+    "max_height_mm": 225, "verified": false,
+    "source_url": "https://www.pnas.org/author-center/digital-art-guidelines"
+  },
+  {
+    "id": "science", "name": "Science", "widths": null,
+    "verified": false, "source_url": "https://www.science.org/content/page/science-information-authors",
+    "todo": "Confirm current printed widths with Science production."
+  }
+]

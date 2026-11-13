@@ -1,0 +1,42 @@
+:root {
+  color-scheme: light;
+  --ink: #21332e;
+  --muted: #566b61;
+  --line: #d5ddd6;
+  --paper: #fcfdf8;
+  --canvas: #edf1e9;
+  --accent: #215a44;
+  --focus: #007a63;
+  font: 14px "DM Sans", "Avenir Next", sans-serif;
+  color: var(--ink);
+  background: var(--paper);
+}
+* { box-sizing: border-box; }
+body { margin: 0; height: 100dvh; display: grid; grid-template-rows: 55px minmax(0, 1fr) auto; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button, input, select, textarea {
+  border: 1px solid var(--line); border-radius: 5px; background: #fff; padding: 6px 9px;
+}
+button { cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.toolbar, .stage-bar { display: flex; align-items: center; gap: 8px; padding: 0 16px; border-bottom: 1px solid var(--line); }
+.brand { font-family: "Instrument Serif", Georgia, serif; font-size: 29px; margin-right: 10px; display: inline-flex; align-items: center; gap: 7px; }
+.brand i { width: 15px; height: 15px; display: inline-block; background: var(--accent); border-radius: 3px; box-shadow: inset 0 0 0 4px var(--accent), inset 0 0 0 5px #fff; }
+#project-name { min-width: 80px; max-width: 250px; border-color: transparent; background: transparent; }
+.spacer { flex: 1; }
+main { display: grid; grid-template-columns: 190px minmax(0, 1fr) 270px; min-height: 0; }
+aside { padding: 15px; overflow: auto; }
+h2 { font-size: 13px; margin: 0 0 14px; }
+.navigator { border-right: 1px solid var(--line); }
+.inspector { border-left: 1px solid var(--line); }
+.stage { background: var(--canvas); display: grid; grid-template-rows: 36px minmax(0, 1fr); min-height: 0; }
+.stage-bar, footer { font: 11px "IBM Plex Mono", monospace; color: var(--muted); }
+.viewport { display: flex; overflow: auto; padding: 36px; background-image: radial-gradient(#c9d4c9 0.7px, transparent 0.7px); background-size: 12px 12px; }
+#frame { position: relative; margin: auto; flex: none; background: white; box-shadow: 0 4px 24px #20362a22, 0 0 0 1px #20362a26; }
+footer { padding: 7px 16px; border-top: 1px solid var(--line); min-height: 27px; }
+.field { display: grid; gap: 4px; margin-bottom: 9px; }
+.field input:not([type=checkbox]), .field select, .field textarea { width: 100%; min-width: 0; }
+@media (max-width: 850px) { main { grid-template-columns: 125px minmax(0, 1fr) 210px; } aside { padding: 10px; } }
+@media (max-width: 640px) { body { height: auto; min-height: 100dvh; } main { grid-template-columns: 1fr; } .stage { min-height: 55vh; } aside { border-bottom: 1px solid var(--line); } .toolbar { flex-wrap: wrap; min-height: 55px; } }

@@ -1,0 +1,7 @@
+.Rhistory
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+node_modules/
+plate/web/vendor/
