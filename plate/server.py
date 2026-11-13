@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from zipfile import BadZipFile
 
 from .bundle import open_bundle, save_bundle, write_workspace
+from .layout import Layout, apply
 from .model import Project, project_from_dict, presets
 
 WEB = Path(__file__).parent / "web"
@@ -32,6 +33,7 @@ class Session:
     def state(self):
         return {
             "project": asdict(self.project),
+            "geometry": Layout(self.project).view(),
             "bundle": str(self.bundle or ""),
             "workspace": str(self.workspace),
         }
@@ -40,11 +42,14 @@ class Session:
         project = project_from_dict(data)
         if project.id != self.project.id:
             raise ValueError("This project is no longer open.")
+        Layout(project)
         write_workspace(project, self.workspace)
         self.project = project
         return self.state()
 
     def action(self, endpoint, data):
+        if endpoint == "/api/layout":
+            return self.update(asdict(apply(self.project, data)))
         if endpoint == "/api/project":
             return self.update(data)
         if endpoint == "/api/new":
