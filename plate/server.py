@@ -12,6 +12,7 @@ from threading import RLock
 from urllib.parse import urlsplit
 from zipfile import BadZipFile
 
+from .alignment import dependency_signature, fixed_axes, participating, validate_groups
 from .bundle import SAFE_ID, atomic_write, open_bundle, save_bundle, script_path, write_json, write_workspace
 from .checks import project_checks
 from .layout import Layout, apply
@@ -21,7 +22,7 @@ from .native import native_signature, render_native
 from .fonts import get_font
 from .interpreters import discovery, interpreter, probe
 from .render import render_script, signature
-from .style import BUILTINS, ENUMS, PT_PER_MM, TOKENS, content_box, resolve, validate_style
+from .style import BUILTINS, ENUMS, PT_PER_MM, TOKENS, content_box, context_for, resolve, validate_style
 from .watcher import Watcher, save_script, sync_scripts
 
 WEB = Path(__file__).parent / "web"
@@ -45,16 +46,18 @@ class Session:
             self.workspace = workspaces / self.project.id
             write_workspace(self.project, self.workspace)
 
-    def render_state(self, panel, rect):
+    def render_state(self, panel, rect, rects=None):
         previous = self.renders.get(panel.id, {})
-        current = self.panel_signature(panel, rect)
+        current = self.panel_signature(panel, rect, rects)
         if previous.get("signature") == current or not previous:
             return {"state": "stale", **previous}
         return {**previous, "state": "stale"}
 
-    def panel_signature(self, panel, rect):
+    def panel_signature(self, panel, rect, rects=None):
         try:
             if panel.type in SCRIPT_EXTENSIONS:
+                if self.project.alignment:
+                    return dependency_signature(self.project, panel, rects or Layout(self.project).rects)
                 return signature(self.project, panel, rect)
             return native_signature(self.project, panel, rect)
         except ValueError:
@@ -67,7 +70,7 @@ class Session:
 
     def state(self):
         geometry = Layout(self.project).view()
-        renders = {panel.id: self.render_state(panel, geometry["rects"][panel.id])
+        renders = {panel.id: self.render_state(panel, geometry["rects"][panel.id], geometry["rects"])
                    for panel in self.project.panels}
         for panel in self.project.panels:
             render = renders[panel.id]
@@ -104,15 +107,33 @@ class Session:
 
     def refresh(self, panel_ids):
         geometry = Layout(self.project).rects
+        requested = participating(self.project, panel_ids)
+        scripts = [panel for panel in self.project.panels
+                   if panel.id in requested and panel.type in SCRIPT_EXTENSIONS]
         for panel in self.project.panels:
-            if panel.id in panel_ids:
+            if panel.id in requested:
                 self.refresh_panel(panel, geometry[panel.id])
+        measured = {panel.id: self.renders[panel.id].get("metadata", {}).get("axes")
+                    if self.renders[panel.id].get("state") == "fresh" else None for panel in scripts}
+        targets, warnings = fixed_axes(self.project, geometry, measured)
+        for panel in scripts:
+            if panel.id in targets:
+                context = context_for(self.project, panel, geometry[panel.id])
+                context["fixed_axes"] = targets[panel.id]
+                self.refresh_panel(panel, geometry[panel.id], context)
+                actual = self.renders[panel.id].get("metadata", {}).get("axes")
+                if not actual or any(abs(a-b)*mm > .15 for a, b, mm in
+                                     zip(actual, targets[panel.id], context["size_mm"]*2, strict=True)):
+                    warnings.setdefault(panel.id, []).append("The plot could not reach the requested alignment.")
+            result = self.renders[panel.id]
+            result["warnings"] = [*result.get("warnings", []), *warnings.get(panel.id, [])]
+            result["signature"] = self.panel_signature(panel, geometry[panel.id], geometry)
         write_json(self.workspace / "cache/index.json", self.renders)
 
-    def refresh_panel(self, panel, rect):
+    def refresh_panel(self, panel, rect, context=None):
         try:
             if panel.type in SCRIPT_EXTENSIONS:
-                result = render_script(self.project, panel, rect, self.workspace, self.bundle)
+                result = render_script(self.project, panel, rect, self.workspace, self.bundle, context)
             else:
                 result = render_native(self.project, panel, rect, self.workspace)
             self.renders[panel.id] = result
@@ -135,6 +156,7 @@ class Session:
             raise ValueError("This project is no longer open.")
         Layout(project)
         validate_style(project)
+        validate_groups(project)
         for panel in project.panels:
             if panel.type in SCRIPT_EXTENSIONS and not script_path(self.workspace, panel).exists():
                 atomic_write(script_path(self.workspace, panel),
@@ -225,7 +247,12 @@ class Session:
             panel = next(panel for panel in self.project.panels if panel.id == data["panel"])
             return probe(interpreter(self.project, panel), panel.type, refresh=True)
         if endpoint == "/api/layout":
-            return self.update(asdict(apply(self.project, data)))
+            project = apply(self.project, data)
+            if data["kind"] == "delete":
+                for group in project.alignment:
+                    group["panels"] = [id for id in group["panels"] if id != data["panel"]]
+                project.alignment = [group for group in project.alignment if len(group["panels"]) > 1]
+            return self.update(asdict(project))
         if endpoint == "/api/project":
             return self.update(data)
         if endpoint == "/api/new":

@@ -37,7 +37,8 @@ def panel_checks(panel, render, style):
     for dpi in metadata.get("effective_dpi", []):
         if dpi < 300:
             checks.append(check("raster-dpi", f"Raster image · {dpi:.0f} dpi (minimum 300 dpi)."))
-    checks.extend(check("script-path", message) for message in render.get("warnings", []))
+    checks.extend(check("script-path" if "absolute path" in message else "alignment", message)
+                  for message in render.get("warnings", []))
     if render.get("state") == "stale":
         checks.append(check("stale", "Panel needs refresh."))
     elif render.get("state") == "error":

@@ -338,6 +338,14 @@ async function refresh(ids) {
   const panels = ids || state.project.panels.filter(
     item => ["stale", "error"].includes(state.renders[item.id]?.state)).map(item => item.id);
   if (!panels.length) return;
+  for (let size = 0; size !== panels.length;) {
+    size = panels.length;
+    for (const group of state.project.alignment) {
+      if (group.panels.some(id => panels.includes(id))) {
+        panels.push(...group.panels.filter(id => !panels.includes(id)));
+      }
+    }
+  }
   const previous = state.renders;
   state.renders = { ...previous };
   for (const id of panels) state.renders[id] = { ...previous[id], state: "rendering" };
@@ -587,6 +595,34 @@ function nativeInspector(panel) {
   return controls;
 }
 
+function drawAlignment(panel) {
+  const groups = state.project.alignment;
+  const others = state.project.panels.filter(item => item.id !== panel.id && isScript(item));
+  const controls = [];
+  for (const axis of ["row", "column"]) {
+    const current = groups.find(group => group.axis === axis && group.panels.includes(panel.id));
+    const members = new Set(current?.panels || [panel.id]);
+    const options = others.map(item => checkField(item.name, members.has(item.id), checked => {
+      if (checked) members.add(item.id);
+      else members.delete(item.id);
+    }));
+    const apply = button(`Set ${axis} lock`, () => change(project => {
+      if (members.size < 2) throw new Error("Select another script panel for this lock.");
+      project.alignment = project.alignment.filter(group =>
+        group.axis !== axis || !group.panels.includes(panel.id));
+      project.alignment.push({ axis, panels: [...members] });
+    }));
+    apply.disabled = !others.length;
+    const remove = button(`Remove ${axis} lock`, () => change(project => {
+      project.alignment = project.alignment.filter(group =>
+        group.axis !== axis || !group.panels.includes(panel.id));
+    }));
+    controls.push(section(axis === "row" ? "Row · top and bottom" : "Column · left and right",
+      [...options, apply, ...(current ? [remove] : [])], Boolean(current)));
+  }
+  return section("Plot alignment", controls, groups.some(group => group.panels.includes(panel.id)));
+}
+
 function drawPanelInspector(panel) {
   const {x, y, w, h} = state.geometry.rects[panel.id];
   const dimensions = Object.entries({x, y, w, h}).map(([key, value]) =>
@@ -611,7 +647,7 @@ function drawPanelInspector(panel) {
   $("#settings").replaceChildren(...basics,
     interpreterField("Interpreter override", panel.type, panel.interpreter,
       value => editPanel(panel, p => { p.interpreter = value; })),
-    drawOverrides(panel), button("Delete panel", () => layout("delete")));
+    drawAlignment(panel), drawOverrides(panel), button("Delete panel", () => layout("delete")));
 
 }
 
@@ -871,7 +907,7 @@ $("#export-format").onchange = () => { $("#dpi-field").hidden = $("#export-forma
 $("#export").onclick = () => {
   if (busy) return;
   const descriptions = { "font-size": "small text", "font-family": "font mismatch", "raster-dpi": "low dpi",
-    stale: "stale", "render-error": "render error", preset: "provisional preset", "script-path": "absolute path" };
+    stale: "stale", "render-error": "render error", preset: "provisional preset", "script-path": "absolute path", alignment: "alignment warning" };
   const counts = {};
   for (const item of state.checks) counts[item.kind] = (counts[item.kind] || 0) + 1;
   $("#export-warnings").textContent = Object.entries(counts)

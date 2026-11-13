@@ -10,3 +10,4 @@
 - Imported PDF panels use the first page and preserve vector content. SVG uses librsvg to convert each asset independently. Any scaling of imported vector text is measured in its final placement.
 - Native raster cover and user crops are placement and clipping operations. Original pixel dimensions survive PDF composition, including for image formats decoded into a lossless PNG before embedding.
 - CodeMirror 6 uses its Python grammar and legacy R mode. A server-side polling watcher handles external editors that save by rename. Script saves compare the editor base against disk so layout and style changes cannot overwrite external edits.
+- Alignment intersects measured plot areas in absolute figure coordinates. Matplotlib repositions its axes, and ggplot2 or patchwork adds physical gtable tracks around the plot without changing text sizes. Base R uses par(plt). Impossible or unmeasurable groups raise an advisory warning.

@@ -96,6 +96,40 @@ if (plate$inject) {
   lwd_tick <- lwd(s$tick_width_pt)
   annotation_scale <- s$annotation_pt / s$font_main_pt
 }
+if (!is.null(plate$fixed_axes)) {
+  bounds <- plate$fixed_axes
+  graphics::par(plt = bounds[c(1, 3, 2, 4)])
+}
+
+measure_gtable <- function(table) {
+  grid::grid.draw(table)
+  grid::grid.force()
+  entries <- grid::grid.ls(viewports = TRUE, grobs = FALSE, print = FALSE)$name
+  boxes <- lapply(grep("^panel(-[0-9]+)*\\.[0-9]+-", unique(entries), value = TRUE), function(name) {
+    tryCatch({
+      grid::seekViewport(name)
+      a <- grid::deviceLoc(grid::unit(0, "npc"), grid::unit(0, "npc"), valueOnly = TRUE)
+      b <- grid::deviceLoc(grid::unit(1, "npc"), grid::unit(1, "npc"), valueOnly = TRUE)
+      c(a$x / size[[1]], a$y / size[[2]], b$x / size[[1]], b$y / size[[2]])
+    }, error = function(e) NULL)
+  })
+  boxes <- Filter(Negate(is.null), boxes)
+  if (!length(boxes)) return(NULL)
+  m <- do.call(rbind, boxes)
+  c(min(m[, 1]), min(m[, 2]), max(m[, 3]), max(m[, 4]))
+}
+
+align_gtable <- function(table, natural, target) {
+  left <- max(0, target[[1]] - natural[[1]]) * size[[1]]
+  right <- max(0, natural[[3]] - target[[3]]) * size[[1]]
+  top <- max(0, natural[[4]] - target[[4]]) * size[[2]]
+  bottom <- max(0, target[[2]] - natural[[2]]) * size[[2]]
+  table <- gtable::gtable_add_cols(table, grid::unit(left, "inches"), pos = 0)
+  table <- gtable::gtable_add_cols(table, grid::unit(right, "inches"))
+  table <- gtable::gtable_add_rows(table, grid::unit(top, "inches"), pos = 0)
+  gtable::gtable_add_rows(table, grid::unit(bottom, "inches"))
+}
+
 axes <- NULL
 tryCatch({
   last <- NULL
@@ -108,22 +142,20 @@ tryCatch({
   if (!is.null(plot)) {
     grid::grid.newpage()
     table <- if (inherits(plot, "patchwork")) patchwork::patchworkGrob(plot) else ggplotGrob(plot)
-    grid::grid.draw(table)
-    grid::grid.force()
-    entries <- grid::grid.ls(viewports = TRUE, grobs = FALSE, print = FALSE)$name
-    boxes <- lapply(grep("^panel(-[0-9]+)*\\.[0-9]+-", unique(entries), value = TRUE), function(name) {
-      tryCatch({
-        grid::seekViewport(name)
-        a <- grid::deviceLoc(grid::unit(0, "npc"), grid::unit(0, "npc"), valueOnly = TRUE)
-        b <- grid::deviceLoc(grid::unit(1, "npc"), grid::unit(1, "npc"), valueOnly = TRUE)
-        c(a$x / size[[1]], a$y / size[[2]], b$x / size[[1]], b$y / size[[2]])
-      }, error = function(e) NULL)
-    })
-    boxes <- Filter(Negate(is.null), boxes)
-    if (length(boxes)) {
-      m <- do.call(rbind, boxes)
-      axes <- c(min(m[, 1]), min(m[, 2]), max(m[, 3]), max(m[, 4]))
+    target <- plate$fixed_axes
+    if (!is.null(target)) {
+      # Measure with an independent recording device. The output device receives
+      # one draw, and the added fixed gutters only shrink the flexible panel tracks.
+      scratch <- tempfile(fileext = ".pdf")
+      grDevices::cairo_pdf(scratch, width = size[[1]], height = size[[2]],
+                           family = if (plate$inject) family else "sans")
+      natural <- tryCatch(measure_gtable(table), finally = {
+        grDevices::dev.off()
+        unlink(scratch)
+      })
+      if (!is.null(natural)) table <- align_gtable(table, natural, target)
     }
+    axes <- measure_gtable(table)
   } else {
     p <- graphics::par("plt")
     axes <- p[c(1, 3, 2, 4)]

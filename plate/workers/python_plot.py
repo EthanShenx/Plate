@@ -84,6 +84,20 @@ def main():
     fig.set_size_inches(*(mm / 25.4 for mm in size))
     fig.canvas.draw()
     bounds = outer_axes(fig)
+    if bounds and context.get("fixed_axes"):
+        left, bottom, right, top = context["fixed_axes"]
+        x0, y0, x1, y1 = bounds
+        sx, sy = (right-left)/(x1-x0), (top-bottom)/(y1-y0)
+        if hasattr(fig, "set_layout_engine"):
+            fig.set_layout_engine("none")
+        for axis in fig.axes:
+            if not axis.get_visible():
+                continue
+            box = axis.get_position()
+            axis.set_position([left+(box.x0-x0)*sx, bottom+(box.y0-y0)*sy,
+                               box.width*sx, box.height*sy])
+        fig.canvas.draw()
+        bounds = outer_axes(fig)
     fig.savefig(output, format="pdf", bbox_inches=None, dpi=300,
                 transparent=context["inject"] and style["background"] == "none")
     Path(metadata).write_text(json.dumps({"axes": bounds}))
