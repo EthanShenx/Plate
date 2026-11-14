@@ -1,5 +1,7 @@
 # Decisions
 
+- A refresh runs at most three independent plotting subprocesses concurrently and reuses the Matplotlib font inventory across workspaces. Serial PDF processing preserves the existing export pipeline. On the Nature sample, the median resize refresh dropped from 3.19 to 1.98 seconds across five new sizes.
+
 - Corner drags move the two adjoining shared edges in one layout transaction. The browser previews the solver result during the drag. Figure margins stay fixed.
 
 - Python standard-library HTTP with browser ES modules keeps startup small and places physical geometry and persistence in Python. FastAPI and React were considered for a larger app.

@@ -1,11 +1,14 @@
 """Local HTTP interface and project session."""
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import ExitStack
 from dataclasses import asdict
 from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
 import mimetypes
+import os
 import subprocess
 from pathlib import Path
 from threading import RLock
@@ -21,18 +24,21 @@ from .export import FORMATS, compose_pdf, rasterize
 from .native import native_signature, render_native
 from .fonts import get_font
 from .interpreters import discovery, interpreter, probe
-from .render import data_directory, render_script, signature
+from .render import data_directory, prepare_script, render_script, seed_matplotlib_cache, signature
 from .style import BUILTINS, ENUMS, PT_PER_MM, TOKENS, content_box, context_for, resolve, validate_style
 from .watcher import Watcher, save_script, sync_scripts
 
 WEB = Path(__file__).parent / "web"
 WORKSPACES = Path.home() / "Library/Application Support/Plate/workspaces"
+RENDER_ERRORS = (ValueError, OSError, RuntimeError, subprocess.SubprocessError)
+MAX_RENDER_WORKERS = 3
 
 
 class Session:
     def __init__(self, bundle=None, workspaces=WORKSPACES):
         self.workspaces = workspaces
         self.preferences = workspaces.parent / "display.json"
+        self.matplotlib_cache = workspaces.parent / "matplotlib"
         if not hasattr(self, "lock"):
             self.lock = RLock()
         self.renders = {}
@@ -51,6 +57,10 @@ class Session:
         Layout(self.project)
         validate_style(self.project)
         validate_groups(self.project)
+        try:
+            seed_matplotlib_cache(self.matplotlib_cache, self.workspaces)
+        except OSError as error:
+            logging.getLogger("plate").info("Could not reuse Matplotlib font cache: %s", error)
 
     def render_state(self, panel, rect, rects=None):
         previous = self.renders.get(panel.id, {})
@@ -135,44 +145,106 @@ class Session:
     def refresh(self, panel_ids):
         geometry = Layout(self.project).rects
         requested = participating(self.project, panel_ids)
-        scripts = [panel for panel in self.project.panels
-                   if panel.id in requested and panel.type in SCRIPT_EXTENSIONS]
-        for panel in self.project.panels:
-            if panel.id in requested:
+        panels = [panel for panel in self.project.panels if panel.id in requested]
+        scripts = [panel for panel in panels if panel.type in SCRIPT_EXTENSIONS]
+        workers = min(MAX_RENDER_WORKERS, os.cpu_count() or 1, len(scripts))
+        if workers > 1:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                self.refresh_batch(panels, geometry, {}, executor)
+                self.align_renders(scripts, geometry, executor)
+        else:
+            for panel in panels:
                 self.refresh_panel(panel, geometry[panel.id])
+            self.align_renders(scripts, geometry)
+        write_json(self.workspace / "cache/index.json", self.renders)
+
+    def refresh_batch(self, panels, geometry, contexts, executor):
+        # Only subprocess execution runs concurrently. PDF processing and
+        # session state stay on the request thread.
+        with ExitStack() as stack:
+            submitted = {}
+            pending = {}
+            for panel in panels:
+                if panel.type not in SCRIPT_EXTENSIONS:
+                    continue
+                rect = geometry[panel.id]
+                try:
+                    job, finish = stack.enter_context(prepare_script(
+                        self.project, panel, rect, self.workspace, self.bundle,
+                        contexts.get(panel.id), matplotlib_cache=self.matplotlib_cache))
+                    if finish is None:
+                        self.store_render(panel, rect, job, geometry)
+                        continue
+                    if job.key not in submitted:
+                        future = executor.submit(job.run)
+                        submitted[job.key] = future
+                        pending[future] = (finish, [])
+                    pending[submitted[job.key]][1].append(panel)
+                except RENDER_ERRORS as error:
+                    self.render_error(panel, rect, error, geometry)
+            for panel in panels:
+                if panel.type not in SCRIPT_EXTENSIONS:
+                    self.refresh_panel(panel, geometry[panel.id])
+            for future in as_completed(pending):
+                finish, users = pending[future]
+                try:
+                    result = finish(future.result())
+                except RENDER_ERRORS as error:
+                    for panel in users:
+                        self.render_error(panel, geometry[panel.id], error, geometry)
+                else:
+                    for panel in users:
+                        self.store_render(panel, geometry[panel.id], result.copy(), geometry)
+
+    def align_renders(self, scripts, geometry, executor=None):
+        if not self.project.alignment:
+            return
         measured = {panel.id: self.renders[panel.id].get("metadata", {}).get("axes")
                     if self.renders[panel.id].get("state") == "fresh" else None for panel in scripts}
         targets, warnings = fixed_axes(self.project, geometry, measured)
+        aligned = [panel for panel in scripts if panel.id in targets]
+        contexts = {
+            panel.id: {**context_for(self.project, panel, geometry[panel.id]),
+                       "fixed_axes": targets[panel.id]} for panel in aligned
+        }
+        if executor and len(aligned) > 1:
+            self.refresh_batch(aligned, geometry, contexts, executor)
+        else:
+            for panel in aligned:
+                self.refresh_panel(panel, geometry[panel.id], contexts[panel.id])
         for panel in scripts:
-            if panel.id in targets:
-                context = context_for(self.project, panel, geometry[panel.id])
-                context["fixed_axes"] = targets[panel.id]
-                self.refresh_panel(panel, geometry[panel.id], context)
+            if panel.id in contexts:
                 actual = self.renders[panel.id].get("metadata", {}).get("axes")
                 if not actual or any(abs(a-b)*mm > .15 for a, b, mm in
-                                     zip(actual, targets[panel.id], context["size_mm"]*2, strict=True)):
+                                     zip(actual, targets[panel.id], contexts[panel.id]["size_mm"]*2, strict=True)):
                     warnings.setdefault(panel.id, []).append("The plot could not reach the requested alignment.")
             result = self.renders[panel.id]
             result["warnings"] = [*result.get("warnings", []), *warnings.get(panel.id, [])]
             result["signature"] = self.panel_signature(panel, geometry[panel.id], geometry)
-        write_json(self.workspace / "cache/index.json", self.renders)
 
     def refresh_panel(self, panel, rect, context=None):
         try:
             if panel.type in SCRIPT_EXTENSIONS:
-                result = render_script(self.project, panel, rect, self.workspace, self.bundle, context)
+                result = render_script(self.project, panel, rect, self.workspace, self.bundle, context,
+                                       matplotlib_cache=self.matplotlib_cache)
             else:
                 result = render_native(self.project, panel, rect, self.workspace)
-            self.renders[panel.id] = result
-            result["signature"] = self.panel_signature(panel, rect)
-        except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as error:
-            logging.getLogger("plate").info("Render failed for %s: %s", panel.id, error)
-            self.renders[panel.id] = {
-                **self.renders.get(panel.id, {}), "state": "error",
-                "signature": self.panel_signature(panel, rect),
-                "error": str(error), "stdout": getattr(error, "stdout", ""),
-                "stderr": getattr(error, "stderr", ""),
-            }
+            self.store_render(panel, rect, result)
+        except RENDER_ERRORS as error:
+            self.render_error(panel, rect, error)
+
+    def store_render(self, panel, rect, result, geometry=None):
+        self.renders[panel.id] = result
+        result["signature"] = self.panel_signature(panel, rect, geometry)
+
+    def render_error(self, panel, rect, error, geometry=None):
+        logging.getLogger("plate").info("Render failed for %s: %s", panel.id, error)
+        self.renders[panel.id] = {
+            **self.renders.get(panel.id, {}), "state": "error",
+            "signature": self.panel_signature(panel, rect, geometry),
+            "error": str(error), "stdout": getattr(error, "stdout", ""),
+            "stderr": getattr(error, "stderr", ""),
+        }
 
     def update(self, data):
         project = project_from_dict(data)

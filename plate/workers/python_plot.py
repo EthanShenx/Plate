@@ -41,12 +41,7 @@ def apply_style(style, palette):
             f"{axis}.major.width": style["tick_width_pt"], f"{axis}.minor.width": style["tick_width_pt"],
             f"{axis}.direction": style["tick_direction"],
         })
-    try:
-        import seaborn as sns
-    except ImportError:
-        pass
-    else:
-        sns.set_palette(palette)
+    # Seaborn's default palette reads the same Matplotlib color cycle.
     mpl.rcParams.update(params)
     annotate, text = Axes.annotate, Axes.text
 

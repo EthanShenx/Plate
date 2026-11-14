@@ -1,11 +1,14 @@
 """Run plot scripts in fresh processes and retain previews by content hash."""
 
+from contextlib import contextmanager
+from dataclasses import dataclass
 from hashlib import sha256
 import json
 import math
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import subprocess
 from tempfile import TemporaryDirectory
@@ -112,7 +115,30 @@ def data_directory(project, workspace, bundle):
     return bundle.parent if bundle else workspace
 
 
-def render_script(project, panel, rect, workspace, bundle, context=None):
+def seed_matplotlib_cache(cache, workspaces):
+    """Carry forward font inventories from Plate versions that stored them per project."""
+    if any(cache.glob("fontlist-*.json")):
+        return
+    for source in workspaces.glob("*/matplotlib/fontlist-*.json"):
+        destination = cache / source.name
+        if not destination.exists():
+            atomic_write(destination, lambda tmp: shutil.copyfile(source, tmp))
+
+
+@dataclass
+class ScriptJob:
+    key: str
+    command: list[str]
+    cwd: Path
+    env: dict
+    timeout: float
+
+    def run(self):
+        return plot_process(self.command, self.cwd, self.env, self.timeout)
+
+
+@contextmanager
+def prepare_script(project, panel, rect, workspace, bundle, context=None, *, matplotlib_cache=None):
     started = monotonic()
     context = context or context_for(project, panel, rect)
     path = interpreter(project, panel)
@@ -129,7 +155,8 @@ def render_script(project, panel, rect, workspace, bundle, context=None):
     cache.mkdir(exist_ok=True)
     output, preview, record = [cache / f"{key}.{ext}" for ext in ("pdf", "png", "json")]
     if output.is_file() and preview.is_file() and record.is_file():
-        return {**json.loads(record.read_text()), "cached": True}
+        yield {**json.loads(record.read_text()), "cached": True}, None
+        return
 
     with TemporaryDirectory(dir=workspace) as folder:
         folder = Path(folder)
@@ -138,8 +165,8 @@ def render_script(project, panel, rect, workspace, bundle, context=None):
                "MPLBACKEND": "Agg", "PYTHONPATH": str(HELPERS / "python") + (
                    os.pathsep + os.environ["PYTHONPATH"] if "PYTHONPATH" in os.environ else "")}
         if panel.type == "script-py":
-            config = workspace / "matplotlib"
-            config.mkdir(exist_ok=True)
+            config = matplotlib_cache or workspace / "matplotlib"
+            config.mkdir(parents=True, exist_ok=True)
             env["MPLCONFIGDIR"] = str(config)
         script = script_path(workspace, panel)
         pdf = folder / "panel.pdf"
@@ -150,27 +177,37 @@ def render_script(project, panel, rect, workspace, bundle, context=None):
         else:
             command = [path, "--vanilla", str(WORKERS / "r_plot.R"), *args,
                        str(HELPERS / "r/plate")]
-        status, stdout, stderr = plot_process(command, cwd, env, project.timeout_s)
-        if status or not pdf.is_file():
-            raise RenderError(f"Plot process exited with status {status}.", stdout, stderr)
-        try:
-            if panel.type == "script-r":
-                normalize_r_pdf(pdf, context["size_mm"])
-            parsed = pdf_metadata(pdf)
-            parsed.update(json.loads(metadata.read_text()))
-            if any(abs(mm * PT_PER_MM - pt) > 0.01 * PT_PER_MM
-                   for mm, pt in zip(context["size_mm"], parsed["page_pt"], strict=True)):
-                raise ValueError("Plot device did not produce the requested physical size.")
-        except (OSError, ValueError, RuntimeError) as error:
-            raise RenderError(str(error), stdout, stderr) from error
-        make_preview(pdf, preview)
-        os.replace(pdf, output)
-        result = {
-            "key": key, "signature": signature(project, panel, rect, context), "state": "fresh",
-            "interpreter_stamp": [path, Path(path).stat().st_mtime_ns],
-            "stdout": stdout, "stderr": stderr, "seconds": monotonic() - started,
-            "warnings": ["Script contains an absolute path."] if ABSOLUTE_PATH.search(panel.script) else [],
-            "metadata": parsed,
-        }
-        write_json(record, result)
-        return result
+
+        def finish(process_result):
+            status, stdout, stderr = process_result
+            if status or not pdf.is_file():
+                raise RenderError(f"Plot process exited with status {status}.", stdout, stderr)
+            try:
+                if panel.type == "script-r":
+                    normalize_r_pdf(pdf, context["size_mm"])
+                parsed = pdf_metadata(pdf)
+                parsed.update(json.loads(metadata.read_text()))
+                if any(abs(mm * PT_PER_MM - pt) > 0.01 * PT_PER_MM
+                       for mm, pt in zip(context["size_mm"], parsed["page_pt"], strict=True)):
+                    raise ValueError("Plot device did not produce the requested physical size.")
+            except (OSError, ValueError, RuntimeError) as error:
+                raise RenderError(str(error), stdout, stderr) from error
+            make_preview(pdf, preview)
+            os.replace(pdf, output)
+            result = {
+                "key": key, "signature": signature(project, panel, rect, context), "state": "fresh",
+                "interpreter_stamp": [path, Path(path).stat().st_mtime_ns],
+                "stdout": stdout, "stderr": stderr, "seconds": monotonic() - started,
+                "warnings": ["Script contains an absolute path."] if ABSOLUTE_PATH.search(panel.script) else [],
+                "metadata": parsed,
+            }
+            write_json(record, result)
+            return result
+
+        yield ScriptJob(key, command, cwd, env, project.timeout_s), finish
+
+
+def render_script(project, panel, rect, workspace, bundle, context=None, *, matplotlib_cache=None):
+    with prepare_script(project, panel, rect, workspace, bundle, context,
+                        matplotlib_cache=matplotlib_cache) as (job, finish):
+        return job if finish is None else finish(job.run())
