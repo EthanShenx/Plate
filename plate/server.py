@@ -225,6 +225,9 @@ class Session:
         return {"path": str(path.resolve())}
 
     def action(self, endpoint, data):
+        if endpoint == "/api/preview-corner":
+            candidate = apply(self.project, {**data, "kind": "resize-corner"})
+            return {"rects": Layout(candidate).rects}
         sync_scripts(self.project, self.workspace)
         if endpoint == "/api/calibrate":
             scale = number(data["pixels_per_mm"], "Pixels per millimetre", 1.5, 12)

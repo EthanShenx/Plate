@@ -24,10 +24,15 @@ let future = [];
 let busy = false;
 let showChecks = false;
 let dragged = null;
+let cornerDrag = null;
 const panels = new Map();
 const typeNames = {"script-py": "Python", "script-r": "R", image: "Image", vector: "Vector", text: "Text", legend: "Legend"};
 const isScript = panel => panel.type.startsWith("script-");
 const edgeNames = ["left", "right", "top", "bottom"];
+const corners = {
+  "top-left": ["left", "top"], "top-right": ["right", "top"],
+  "bottom-left": ["left", "bottom"], "bottom-right": ["right", "bottom"],
+};
 
 async function request(path, body) {
   const response = await fetch(path, body === undefined ? {} : {
@@ -50,7 +55,7 @@ function report(message) {
 }
 
 async function commit(path, body, remember = true) {
-  if (busy) return false;
+  if (busy || cornerDrag) return false;
   busy = true;
   try {
     const before = state.project;
@@ -201,6 +206,111 @@ function resizeHandle(key, handle) {
   return node;
 }
 
+function positionPanels(rects) {
+  for (const [id, rect] of Object.entries(rects)) {
+    const tile = panels.get(id);
+    if (tile) rectangle(tile, rect);
+  }
+}
+
+function cornerHandle(tile, panelId, corner, edges) {
+  const node = document.createElement("button");
+  node.type = "button";
+  node.className = `corner-handle ${corner}`;
+  const caption = `Resize from ${corner.replace("-", " ")}`;
+  node.setAttribute("aria-label", caption);
+
+  const mobility = () => {
+    const shared = state.geometry.panel_edges?.[panelId] || [];
+    return edges.map(edge => shared.includes(edge));
+  };
+  const operation = (dx, dy, snap = 0) => ({ panel: panelId, corner, dx, dy, snap });
+
+  node.onclick = event => event.stopPropagation();
+  node.ondragstart = event => event.preventDefault();
+  node.onkeydown = event => {
+    const step = event.shiftKey ? 5 : 1;
+    const [dx, dy] = {
+      ArrowLeft: [-step, 0], ArrowRight: [step, 0],
+      ArrowUp: [0, -step], ArrowDown: [0, step],
+    }[event.key] || [0, 0];
+    const [x, y] = mobility();
+    if (!(x && dx || y && dy)) return;
+    event.preventDefault();
+    layout("resize-corner", operation(dx, dy));
+  };
+
+  node.onpointerdown = event => {
+    if (event.button !== 0 || event.isPrimary === false || busy || cornerDrag) return;
+    const [x, y] = mobility();
+    if (!x && !y) return;
+    event.stopPropagation();
+    const frame = $("#frame");
+    const start = [event.clientX, event.clientY];
+    const scale = zoom;
+    const snap = Math.min(20, 5 / scale);
+    const movement = point => operation(
+      x ? (point.clientX - start[0]) / scale : 0,
+      y ? (point.clientY - start[1]) / scale : 0, snap);
+    const pointer = event.pointerId;
+    const frameClass = "resizing-corner";
+    let pending = null;
+    let inFlight = false;
+    let raf = 0;
+    const gesture = {};
+    cornerDrag = gesture;
+    frame.classList.add(frameClass);
+    tile.draggable = false;
+    node.setPointerCapture(pointer);
+
+    const schedule = () => {
+      if (!inFlight && !raf && pending) raf = requestAnimationFrame(preview);
+    };
+    async function preview() {
+      raf = 0;
+      const next = pending;
+      pending = null;
+      inFlight = true;
+      try {
+        const result = await request("/api/preview-corner", next);
+        if (cornerDrag === gesture) positionPanels(result.rects);
+      } catch {
+        // The final layout request reports errors and restores the committed geometry.
+      } finally {
+        inFlight = false;
+        if (cornerDrag === gesture) schedule();
+      }
+    }
+
+    node.onpointermove = move => {
+      if (move.pointerId !== pointer) return;
+      pending = movement(move);
+      schedule();
+    };
+    const finish = async (end, save) => {
+      if (end.pointerId !== pointer || cornerDrag !== gesture) return;
+      node.onpointermove = null;
+      node.onpointerup = null;
+      node.onpointercancel = null;
+      node.onlostpointercapture = null;
+      cancelAnimationFrame(raf);
+      pending = null;
+      cornerDrag = null;
+      tile.draggable = true;
+      const next = movement(end);
+      frame.classList.remove(frameClass);
+      if (save && (Math.abs(next.dx) > .1 || Math.abs(next.dy) > .1)) {
+        if (await layout("resize-corner", next)) return;
+      }
+      positionPanels(state.geometry.rects);
+    };
+    node.onpointerup = end => finish(end, true);
+    node.onpointercancel = end => finish(end, false);
+    node.onlostpointercapture = end => finish(end, false);
+  };
+  return node;
+}
+
 function calibratedScale() {
   const value = Number(state.pixels_per_mm);
   return value > 0 ? value : CSS_PX_PER_MM;
@@ -214,6 +324,7 @@ function fitScale() {
 }
 
 function drawCanvas() {
+  if (cornerDrag) return;
   const frame = $("#frame");
   const { project, geometry } = state;
   if (viewMode === "fit") zoom = fitScale();
@@ -248,9 +359,15 @@ function drawCanvas() {
       label.className = "panel-label";
       tile.append(caption, preview, highlights, label, badge);
       for (const edge of [...edgeNames, "center"]) dropZone(tile, edge, panel.id);
+      for (const [corner, edges] of Object.entries(corners)) {
+        tile.append(cornerHandle(tile, panel.id, corner, edges));
+      }
       tile.onclick = () => selectPanel(panel.id);
       tile.onkeydown = event => {
-        if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectPanel(panel.id); }
+        if (event.target === tile && (event.key === "Enter" || event.key === " ")) {
+          event.preventDefault();
+          selectPanel(panel.id);
+        }
       };
       tile.ondragstart = event => dragPanel(event, panel.id);
       tile.ondragend = endDrag;
@@ -258,6 +375,16 @@ function drawCanvas() {
       frame.append(tile);
     }
     tile.classList.toggle("selected", panel.id === selected);
+    const shared = geometry.panel_edges?.[panel.id] || [];
+    for (const [corner, [horizontal, vertical]] of Object.entries(corners)) {
+      const handle = tile.querySelector(`.corner-handle.${corner}`);
+      const x = shared.includes(horizontal);
+      const y = shared.includes(vertical);
+      handle.disabled = !x && !y;
+      handle.dataset.movement = x && y ? "both" : x ? "x" : y ? "y" : "fixed";
+      handle.title = handle.disabled ? "This corner is fixed by the figure margins" :
+        `${handle.getAttribute("aria-label")}${x && y ? "" : x ? " horizontally" : " vertically"}`;
+    }
     tile.querySelector(".tile-caption").textContent = panel.name;
     const render = state.renders[panel.id];
     const image = tile.querySelector(".plot-preview");
@@ -355,7 +482,7 @@ function stringField(caption, value, onChange) {
 }
 
 async function refresh(ids) {
-  if (busy) return;
+  if (busy || cornerDrag) return;
   const panels = ids || state.project.panels.filter(
     item => ["stale", "error"].includes(state.renders[item.id]?.state)).map(item => item.id);
   if (!panels.length) return;
@@ -731,7 +858,7 @@ function drawEditor(panel) {
 }
 
 async function saveDraft(panel) {
-  if (busy) return false;
+  if (busy || cornerDrag) return false;
   const draft = reconcileDraft(panel);
   if (draft.value === draft.base) return true;
   busy = true;
@@ -896,7 +1023,7 @@ function draw() {
 }
 
 async function action(name, data = {}) {
-  if (busy) return;
+  if (busy || cornerDrag) return;
   busy = true;
   try {
     state = await request(`/api/${name}`, data);

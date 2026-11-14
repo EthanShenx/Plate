@@ -24,7 +24,7 @@ Use `brew install librsvg` if you plan to import SVG. If **Dependencies** report
 ## Five-minute tutorial
 
 1. Run `make run BUNDLE=examples/nature-double.plate` and choose **Refresh all stale**. The 183 × 123 mm project contains four plot scripts, a synthetic microscopy image and a shared legend.
-2. Drag a panel onto an edge target to insert it beside another panel, or onto a centre target to swap them. A frame-edge target creates a full-width row or full-height column. Drag a gutter to resize. The geometry inspector offers numeric edits and width or height locks.
+2. Hover over or select a panel to reveal its four corners. Drag a corner to move the adjacent shared edges together, or drag a gutter to adjust one edge. The outer margins stay fixed. Drag the panel body onto an edge target to insert it beside another panel, or onto a centre target to swap them. The geometry inspector offers numeric edits and width or height locks.
 3. Click the paper margin to open global settings. Change a font role, stroke or semantic colour, then refresh. Stale script previews stay visible. Select a panel to edit its label, opt out of style injection or override individual tokens.
 4. Select a script panel and edit it in CodeMirror. **Run** saves and refreshes it. **Reveal script** shows the live workspace file in Finder. Changes saved in an external editor reload into CodeMirror. Use **Checks** to locate print-size warnings.
 5. Use **Save** to write a `.plate` bundle and optionally include previews. Choose **Export** for an editable PDF or an RGB TIFF/PNG at 300, 600 or 1200 dpi. Use a different save path to keep the bundled sample available for future tutorials.

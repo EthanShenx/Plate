@@ -10,6 +10,10 @@ EPSILON = 1e-7
 AXES = {"x": ("x", "w"), "y": ("y", "h")}
 EDGES = {"left": ("x", False), "right": ("x", True),
          "top": ("y", False), "bottom": ("y", True)}
+CORNERS = {
+    "top-left": ("left", "top"), "top-right": ("right", "top"),
+    "bottom-left": ("left", "bottom"), "bottom-right": ("right", "bottom"),
+}
 
 
 @dataclass(frozen=True)
@@ -150,7 +154,32 @@ class Layout:
             "handles": {key: {field: value for field, value in handle.items()
                               if field not in {"sizes", "split", "index"}}
                         for key, handle in self.handles.items()},
+            "panel_edges": {
+                panel: [edge for edge in EDGES if self.panel_edge(panel, edge) is not None]
+                for panel in self.rects
+            },
         }
+
+    def panel_edge(self, panel_id, edge):
+        axis, trailing = EDGES[edge]
+        origin, dim = AXES[axis]
+        other, other_dim = AXES["y" if axis == "x" else "x"]
+        rect = self.rects[panel_id]
+        position = rect[origin] + (rect[dim] + self.gutter / 2 if trailing else -self.gutter / 2)
+        return next((key for key, handle in self.handles.items()
+                     if handle["axis"] == axis and abs(handle["at"] - position) <= EPSILON
+                     and handle["start"] < rect[other] + rect[other_dim] - EPSILON
+                     and handle["start"] + handle["length"] > rect[other] + EPSILON), None)
+
+    def resize_corner(self, panel_id, corner, dx, dy, snap):
+        if corner not in CORNERS:
+            raise ValueError("Unknown panel corner.")
+        snap = number(snap, "Snap distance", 0, 20)
+        for edge, delta in zip(CORNERS[corner], (dx, dy), strict=True):
+            delta = number(delta, "Movement", -5000, 5000)
+            handle = self.panel_edge(panel_id, edge)
+            if handle is not None and abs(delta) > EPSILON:
+                self.resize(handle, delta, snap)
 
     def resize(self, handle_id, delta, snap=0):
         handle = self.handles[handle_id]
@@ -201,20 +230,13 @@ class Layout:
         delta = value - rect[field]
         if abs(delta) <= EPSILON:
             return
-        leading = rect[origin] - self.gutter / 2
-        trailing = rect[origin] + rect[dim] + self.gutter / 2
-        other, other_dim = AXES["y" if axis == "x" else "x"]
-        candidates = [
-            (key, item) for key, item in self.handles.items()
-            if item["axis"] == axis and item["start"] < rect[other] + rect[other_dim]
-            and item["start"] + item["length"] > rect[other]
-        ]
+        leading, trailing = ("left", "right") if axis == "x" else ("top", "bottom")
         edges = [(leading, delta)] if field == origin else [(trailing, delta), (leading, -delta)]
-        for position, movement in edges:
-            for key, item in candidates:
-                if abs(item["at"] - position) <= EPSILON:
-                    self.resize(key, movement)
-                    return
+        for edge, movement in edges:
+            handle = self.panel_edge(panel_id, edge)
+            if handle is not None:
+                self.resize(handle, movement)
+                return
         raise ValueError("That edge is fixed by the figure margin. Move or split the panel first.")
 
 
@@ -280,6 +302,9 @@ def apply(project, operation):
             panel.locks.pop(field, None)
     elif kind == "resize":
         Layout(project).resize(operation["handle"], operation["delta"], operation.get("snap", 0))
+    elif kind == "resize-corner":
+        Layout(project).resize_corner(panel_id, operation["corner"], operation["dx"],
+                                      operation["dy"], operation.get("snap", 0))
     elif kind == "edit":
         if operation["field"] not in {"x", "y", "w", "h"}:
             raise ValueError("Unknown dimension.")

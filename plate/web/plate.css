@@ -58,6 +58,27 @@ footer { padding: 7px 16px; border-top: 1px solid var(--line); min-height: 27px;
 .handle.y::after { top: -4px; bottom: -4px; }
 .handle:hover, .handle.resizing { border-color: var(--focus); }
 .dragging .handle { pointer-events: none; }
+.corner-handle {
+  position: absolute; z-index: 6; display: grid; place-items: center;
+  width: 19px; height: 19px; padding: 0; border: 0; background: transparent;
+  opacity: 0; touch-action: none;
+}
+.corner-handle::before {
+  content: ""; width: 8px; height: 8px; border-radius: 2px;
+  border: 1px solid var(--accent); background: #fff;
+}
+.corner-handle.top-left { top: 0; left: 0; cursor: nwse-resize; }
+.corner-handle.top-right { top: 0; right: 0; cursor: nesw-resize; }
+.corner-handle.bottom-left { bottom: 0; left: 0; cursor: nesw-resize; }
+.corner-handle.bottom-right { bottom: 0; right: 0; cursor: nwse-resize; }
+.corner-handle[data-movement="x"] { cursor: ew-resize; }
+.corner-handle[data-movement="y"] { cursor: ns-resize; }
+.tile:hover .corner-handle, .tile.selected .corner-handle, .tile:focus-within .corner-handle { opacity: 1; }
+.tile:hover .corner-handle:disabled, .tile.selected .corner-handle:disabled { opacity: .4; }
+.corner-handle:enabled:hover::before, .corner-handle:focus-visible::before { background: var(--accent); }
+.dragging .corner-handle { visibility: hidden; }
+.resizing-corner .tile { transition: none; }
+.resizing-corner .handle { visibility: hidden; }
 .drop-zone { display: none; position: absolute; z-index: 5; border: 1px dashed #36765c66; background: #44977220; }
 .dragging .drop-zone { display: block; }
 .dragging .drag-source .drop-zone { display: none; }
