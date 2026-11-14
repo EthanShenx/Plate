@@ -288,12 +288,7 @@ class Session:
             panel = next(panel for panel in self.project.panels if panel.id == data["panel"])
             return probe(interpreter(self.project, panel), panel.type, refresh=True)
         if endpoint == "/api/layout":
-            project = apply(self.project, data)
-            if data["kind"] == "delete":
-                for group in project.alignment:
-                    group["panels"] = [id for id in group["panels"] if id != data["panel"]]
-                project.alignment = [group for group in project.alignment if len(group["panels"]) > 1]
-            return self.update(asdict(project))
+            return self.update_layout(data)
         if endpoint == "/api/project":
             return self.update(data)
         if endpoint == "/api/new":
@@ -317,6 +312,29 @@ class Session:
         else:
             raise ValueError("Unknown project action.")
         return self.state()
+
+    def update_layout(self, data):
+        project = apply(self.project, data)
+        auto_render = data.get("auto_render", False)
+        if auto_render:
+            previous_rects = Layout(self.project).rects
+            before = {panel.id: self.panel_signature(panel, previous_rects[panel.id], previous_rects)
+                      for panel in self.project.panels}
+        if data["kind"] == "delete":
+            for group in project.alignment:
+                group["panels"] = [id for id in group["panels"] if id != data["panel"]]
+            project.alignment = [group for group in project.alignment if len(group["panels"]) > 1]
+        result = self.update(asdict(project))
+        if auto_render:
+            rects = result["geometry"]["rects"]
+            result["panels_to_refresh"] = [
+                panel.id for panel in self.project.panels
+                if result["renders"][panel.id]["state"] != "fresh"
+                and (panel.type not in SCRIPT_EXTENSIONS or panel.script.strip())
+                and (rects[panel.id] != previous_rects.get(panel.id)
+                     or self.panel_signature(panel, rects[panel.id], rects) != before.get(panel.id))
+            ]
+        return result
 
 
 class Handler(BaseHTTPRequestHandler):

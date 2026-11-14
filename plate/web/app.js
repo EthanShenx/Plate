@@ -76,8 +76,12 @@ function change(mutate) {
   return commit("/api/project", project);
 }
 
-function layout(kind, fields = {}) {
-  return commit("/api/layout", { kind, panel: selected, ...fields });
+async function layout(kind, fields = {}, autoRender = false) {
+  const saved = await commit("/api/layout", { kind, panel: selected, ...fields, auto_render: autoRender });
+  if (saved && autoRender && state.panels_to_refresh?.length) {
+    await refresh(state.panels_to_refresh);
+  }
+  return saved;
 }
 
 async function history(from, to) {
@@ -135,8 +139,8 @@ function dropZone(parent, edge, target, frame = false) {
     const panel = dragged;
     endDrag();
     if (panel === "new") {
-      if (edge !== "center") addPanel(target, edge);
-    } else if (panel && panel !== target) layout("move", { panel, target, edge });
+      if (edge !== "center") addPanel(target, edge, true);
+    } else if (panel && panel !== target) layout("move", { panel, target, edge }, true);
   };
   parent.append(zone);
 }
@@ -149,6 +153,10 @@ function endDrag() {
 }
 
 function dragPanel(event, id) {
+  if (busy || cornerDrag) {
+    event.preventDefault();
+    return;
+  }
   dragged = id;
   event.dataTransfer.setData("text/plain", id);
   event.dataTransfer.effectAllowed = "move";
@@ -173,7 +181,7 @@ function resizeHandle(key, handle) {
   rectangle(node, rect);
   const pointer = event => vertical ? event.clientX : event.clientY;
   node.onpointerdown = event => {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || busy || cornerDrag) return;
     const start = pointer(event);
     const group = [...$("#frame").querySelectorAll(".handle")].filter(
       item => item.dataset.axis === handle.axis && Math.abs(Number(item.dataset.at) - handle.at) < 1e-7
@@ -191,7 +199,9 @@ function resizeHandle(key, handle) {
       node.onpointermove = null;
       for (const item of group) item.style.transform = "";
       const delta = (pointer(end) - start) / zoom;
-      if (commitResize && Math.abs(delta) > 0.1) layout("resize", { handle: key, delta, snap: 5 / zoom });
+      if (commitResize && Math.abs(delta) > 0.1) {
+        layout("resize", { handle: key, delta, snap: Math.min(20, 5 / zoom) }, true);
+      }
     };
     node.onpointerup = end => finish(end, true);
     node.onpointercancel = end => finish(end, false);
@@ -300,7 +310,7 @@ function cornerHandle(tile, panelId, corner, edges) {
       const next = movement(end);
       frame.classList.remove(frameClass);
       if (save && (Math.abs(next.dx) > .1 || Math.abs(next.dy) > .1)) {
-        if (await layout("resize-corner", next)) return;
+        if (await layout("resize-corner", next, true)) return;
       }
       positionPanels(state.geometry.rects);
     };
@@ -1038,10 +1048,10 @@ async function action(name, data = {}) {
   finally { busy = false; }
 }
 
-async function addPanel(target = selected, edge = "right") {
+async function addPanel(target = selected, edge = "right", autoRender = false) {
   const type = $("#panel-type").value;
   const name = `${typeNames[type]} panel`;
-  if (await layout("add", { type, name, panel: target, edge })) {
+  if (await layout("add", { type, name, panel: target, edge }, autoRender)) {
     showChecks = false;
     selectPanel(state.project.panels.at(-1).id);
   }
