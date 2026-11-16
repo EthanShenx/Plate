@@ -1,4 +1,4 @@
-"""Translate measured plot bounds into shared physical plot edges."""
+"""Share physical plot insets without forcing panels to share a plot size."""
 
 from hashlib import sha256
 import json
@@ -37,9 +37,10 @@ def dependency_signature(project, panel, rects):
     groups = [group for group in project.alignment if ids.intersection(group["panels"])]
     if not groups:
         return own
-    members = [(other.id, rects[other.id], signature(project, other, rects[other.id]))
+    members = [(other.id, rects[other.id]["w"], rects[other.id]["h"],
+                signature(project, other, rects[other.id]))
                for other in project.panels if other.id in ids]
-    return sha256(json.dumps([groups, members], sort_keys=True).encode()).hexdigest()
+    return sha256(json.dumps(["shared-panel-insets", groups, members], sort_keys=True).encode()).hexdigest()
 
 
 def absolute_axes(box, axes):
@@ -56,7 +57,8 @@ def normalized_axes(box, axes):
 
 def fixed_axes(project, rects, measured):
     """Return target normalized axes and warnings keyed by panel ID."""
-    boxes = {panel.id: content_box(rects[panel.id], panel, resolve(project, panel)["style"])
+    boxes = {panel.id: content_box({**rects[panel.id], "x": 0, "y": 0},
+                                  panel, resolve(project, panel)["style"])
              for panel in project.panels if panel.id in measured and measured[panel.id]}
     natural = {id: absolute_axes(box, measured[id]) for id, box in boxes.items()}
     adjusted = {id: bounds.copy() for id, bounds in natural.items()}
@@ -65,19 +67,21 @@ def fixed_axes(project, rects, measured):
         ids = group["panels"]
         if not set(ids).intersection(measured):
             continue
-        i, j = (1, 3) if group["axis"] == "row" else (0, 2)
+        i, j, dimension = (1, 3, "h") if group["axis"] == "row" else (0, 2, "w")
         if all(id in natural for id in ids):
-            lower = max(natural[id][i] for id in ids)
-            upper = min(natural[id][j] for id in ids)
-            if upper - lower >= 1:
+            extent = {id: rects[id][dimension] for id in ids}
+            leading = max(natural[id][i] for id in ids)
+            trailing = max(extent[id] - natural[id][j] for id in ids)
+            if min(extent.values()) - leading - trailing >= 1:
                 for id in ids:
-                    adjusted[id][i] = lower
-                    adjusted[id][j] = upper
+                    adjusted[id][i] = leading
+                    adjusted[id][j] = extent[id] - trailing
                 continue
-            message = f"These panels have no shared {group['axis']} plot span."
+            message = f"The shared {group['axis']} margins leave too little plot area in the smallest panel."
         else:
             message = f"The {group['axis']} lock needs measurable axes in every panel."
         for id in ids:
             warnings.setdefault(id, []).append(message)
-    targets = {id: normalized_axes(boxes[id], axes) for id, axes in adjusted.items() if axes != natural[id]}
+    targets = {id: normalized_axes(boxes[id], axes) for id, axes in adjusted.items()
+               if any(abs(target - current) > 1e-8 for target, current in zip(axes, natural[id], strict=True))}
     return targets, warnings

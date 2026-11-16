@@ -36,7 +36,11 @@ For base graphics, use `plot()`, `lines()` and `text()` in the script. Keep spac
 
 ## Style and standalone use
 
-The helpers expose `style`, `size_mm`, `palette` and `colors`. Use the semantic map explicitly for mapped group aesthetics, for example `scale_colour_manual(values = plate$colors)` or `palette=plate.colors` in seaborn. The **Use script’s own style** option skips automatic theme injection and still provides the helper context and final content dimensions.
+The helpers expose `style`, `size_mm`, `palette` and `colors`. Use the semantic map explicitly for mapped group aesthetics, for example `scale_colour_manual(values = plate$colors)` or `palette=plate.colors` in seaborn. Plate reapplies supported panel overrides to Matplotlib and ggplot2 objects after the script runs. Palette overrides supply the default colour cycle. Explicit colours and mapped scales remain under script control. **Use the script’s style** skips injection and still provides the helper context and final content dimensions.
+
+Plate adjusts Matplotlib margins when labels extend past the PDF page. If the full content still exceeds the page, Plate fits it proportionally and reports this in **Checks**. Enlarge the panel to keep the requested font sizes.
+
+To draw connectors or other layout-aware artwork, choose panels in **Geometry → Referenced panels**. A bundle specification can set the same references under a script panel’s `settings.geometry_refs` as a list of panel IDs. In Python, `plate.context.get("panel_boxes_mm", {})` maps those IDs to content rectangles with `x`, `y`, `w` and `h`. R exposes the map as `plate$panel_boxes_mm`. Coordinates are in millimetres from the script panel’s content origin, measured to the right and down. The content rectangle starts below the panel letter. Plate rerenders the script when a referenced rectangle changes relative to it. Deleted references are absent from the map. Give the drawing panel enough room for its connectors to stay within the page it renders.
 
 Install the helpers into your chosen standalone environment from the checkout.
 

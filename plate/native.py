@@ -15,7 +15,7 @@ from .bundle import atomic_write, write_json
 from .export import flatten_placement
 from .fonts import get_font, name_embedded_fonts, write_text
 from .interpreters import login_path
-from .render import make_preview, pdf_metadata
+from .render import fit_pdf_text, make_preview, pdf_metadata
 from .style import PT_PER_MM, context_for
 
 
@@ -165,7 +165,7 @@ def legend_panel(page, panel, context):
 
 
 def native_signature(project, panel, rect):
-    data = (4, panel.type, panel.settings, panel.asset, context_for(project, panel, rect))
+    data = (6, panel.type, panel.settings, panel.asset, context_for(project, panel, rect))
     return sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 
@@ -199,9 +199,19 @@ def render_native(project, panel, rect, workspace):
         if panel.type in {"text", "legend"}:
             document.subset_fonts()
             name_embedded_fonts(document, page)
-        atomic_write(output, lambda tmp: tmp.write_bytes(document.tobytes(garbage=4, deflate=True)))
+        fitted = False
+
+        def write_panel(tmp):
+            nonlocal fitted
+            tmp.write_bytes(document.tobytes(garbage=4, deflate=True))
+            if panel.type in {"text", "legend"}:
+                _, fitted = fit_pdf_text(tmp)
+
+        atomic_write(output, write_panel)
     metadata = pdf_metadata(output)
     make_preview(output, preview)
     result = {"state": "fresh", "key": key, "signature": key, "metadata": metadata}
+    if fitted:
+        result["warnings"] = ["Content was scaled to fit the panel. Enlarge the panel to keep the requested font sizes."]
     write_json(record, result)
     return result

@@ -11,20 +11,25 @@ import mimetypes
 import os
 import subprocess
 from pathlib import Path
-from threading import RLock
+from threading import Lock, RLock
+from time import time
 from urllib.parse import urlsplit
 from zipfile import BadZipFile
 
 from .alignment import dependency_signature, fixed_axes, participating, validate_groups
-from .bundle import SAFE_ID, asset_path, atomic_write, open_bundle, save_bundle, script_path, write_json, write_workspace
+from .bundle import (
+    SAFE_ID, asset_path, atomic_write, import_asset, open_bundle, read_workspace, save_bundle, script_path,
+    write_json, write_workspace,
+)
 from .checks import project_checks
-from .layout import Layout, apply, number
+from .grid import apply_grid, as_grid, fit_artboard, is_grid, validate_panel_groups
+from .layout import Layout
 from .model import Project, SCRIPT_EXTENSIONS, project_from_dict, presets
 from .export import FORMATS, compose_pdf, rasterize
 from .native import native_signature, render_native
-from .fonts import get_font
+from .fonts import label_metrics
 from .interpreters import discovery, interpreter, probe
-from .render import data_directory, prepare_script, render_script, seed_matplotlib_cache, signature
+from .render import PREVIEW_DPI, data_directory, make_preview, prepare_script, render_script, seed_matplotlib_cache, signature
 from .style import BUILTINS, ENUMS, PT_PER_MM, TOKENS, content_box, context_for, resolve, validate_style
 from .watcher import Watcher, save_script, sync_scripts
 
@@ -32,37 +37,110 @@ WEB = Path(__file__).parent / "web"
 WORKSPACES = Path.home() / "Library/Application Support/Plate/workspaces"
 RENDER_ERRORS = (ValueError, OSError, RuntimeError, subprocess.SubprocessError)
 MAX_RENDER_WORKERS = 3
+PREVIEW_LOCK = Lock()
+
+
+def workspace_record(workspace):
+    try:
+        record = json.loads((workspace / "library.json").read_text(encoding="utf-8"))
+        return record if isinstance(record, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def project_digest(project):
+    return sha256(json.dumps(project, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def project_library(workspaces):
+    projects = []
+    for workspace in workspaces.iterdir():
+        if workspace.is_symlink() or not workspace.is_dir():
+            continue
+        manifest = workspace / "manifest.json"
+        try:
+            project = json.loads(manifest.read_text(encoding="utf-8"))
+            name = project.get("name", project.get("title", "Untitled figure"))
+            if not isinstance(name, str):
+                continue
+            panel_count = len(project.get("panel_ids", []))
+            record = workspace_record(workspace)
+            if not record and not panel_count and name == "Untitled figure":
+                continue
+            bundle = record.get("bundle", "")
+            projects.append({
+                "id": workspace.name, "name": name, "panels": panel_count,
+                "bundle": bundle if isinstance(bundle, str) else "",
+                "modified": max(manifest.stat().st_mtime, record.get("opened_at", 0)),
+            })
+        except (OSError, ValueError, AttributeError, TypeError):
+            continue
+    return sorted(projects, key=lambda project: project["modified"], reverse=True)
+
+
+def has_render_source(panel):
+    if panel.type in SCRIPT_EXTENSIONS:
+        return bool(panel.script.strip())
+    return panel.type not in {"image", "vector"} or bool(panel.asset)
 
 
 class Session:
-    def __init__(self, bundle=None, workspaces=WORKSPACES):
+    def __init__(self, bundle=None, workspaces=WORKSPACES, *, workspace=None):
         self.workspaces = workspaces
-        self.preferences = workspaces.parent / "display.json"
         self.matplotlib_cache = workspaces.parent / "matplotlib"
         if not hasattr(self, "lock"):
             self.lock = RLock()
         self.renders = {}
         self.keep_cache = False
+        self.registered_workspace = workspace is not None
         self.bundle = Path(bundle).resolve() if bundle else None
-        if self.bundle:
+        self.saved_digest = None
+        if workspace is not None:
+            self.workspace = workspace
+            self.project = read_workspace(workspace)
+            record = workspace_record(workspace)
+            if isinstance(record.get("bundle"), str) and record["bundle"]:
+                self.bundle = Path(record["bundle"])
+            self.saved_digest = record.get("saved_digest")
+        elif self.bundle:
             self.project, self.workspace = open_bundle(self.bundle, workspaces)
-            index = self.workspace / "cache/index.json"
-            if index.is_file():
-                self.renders = json.loads(index.read_text())
-                self.keep_cache = True
         else:
             self.project = Project()
+            self.project.size.minimum_mm = 4
+            as_grid(self.project)
             self.workspace = workspaces / self.project.id
             write_workspace(self.project, self.workspace)
+        as_grid(self.project)
         Layout(self.project)
         validate_style(self.project)
         validate_groups(self.project)
+        validate_panel_groups(self.project)
+        index = self.workspace / "cache/index.json"
+        if index.is_file():
+            self.renders = json.loads(index.read_text())
+            self.keep_cache = True
+        if workspace is not None:
+            self.keep_cache = record.get("keep_cache", self.keep_cache)
+        elif self.bundle:
+            self.saved_digest = project_digest(asdict(self.project))
+            self.remember_workspace()
         try:
             seed_matplotlib_cache(self.matplotlib_cache, self.workspaces)
+            if self.workspaces != WORKSPACES:
+                seed_matplotlib_cache(self.matplotlib_cache, WORKSPACES)
         except OSError as error:
             logging.getLogger("plate").info("Could not reuse Matplotlib font cache: %s", error)
 
+    def remember_workspace(self):
+        write_json(self.workspace / "library.json", {
+            "bundle": str(self.bundle or ""), "saved_digest": self.saved_digest,
+            "keep_cache": self.keep_cache, "opened_at": time(),
+        })
+        self.registered_workspace = True
+
     def render_state(self, panel, rect, rects=None):
+        if not has_render_source(panel):
+            return {"state": "empty"}
         previous = self.renders.get(panel.id, {})
         current = self.panel_signature(panel, rect, rects)
         if previous.get("signature") == current or not previous:
@@ -94,14 +172,8 @@ class Session:
     def initialize_native_panels(self):
         geometry = Layout(self.project).rects
         for panel in self.project.panels:
-            if panel.type not in SCRIPT_EXTENSIONS and panel.id not in self.renders:
+            if panel.type not in SCRIPT_EXTENSIONS and panel.id not in self.renders and has_render_source(panel):
                 self.refresh_panel(panel, geometry[panel.id])
-
-    def display_scale(self):
-        try:
-            return json.loads(self.preferences.read_text()).get("pixels_per_mm")
-        except (OSError, ValueError):
-            return None
 
     def state(self):
         geometry = Layout(self.project).view()
@@ -116,25 +188,24 @@ class Session:
             except ValueError:
                 render["box"] = rect
             if panel.label:
-                font = get_font(style["font_family"], style["panel_label_weight"] == "bold")
+                width, height = rect["w"] * PT_PER_MM, rect["h"] * PT_PER_MM
+                font, size, bounds = label_metrics(panel.label, width, height - PT_PER_MM, style)
                 render["label_metadata"] = {
-                    "text": panel.label, "font": font.name, "size": style["panel_label_pt"],
-                    "page_pt": [rect["w"] * PT_PER_MM, rect["h"] * PT_PER_MM],
+                    "text": panel.label, "font": font.name, "size": size,
+                    "page_pt": [width, height], "bbox": bounds,
                 }
-                x, y = (style[f"label_offset_{axis}_mm"] * PT_PER_MM for axis in ("x", "y"))
-                render["label_metadata"]["bbox"] = [
-                    x, y, x + font.text_length(panel.label, fontsize=style["panel_label_pt"]),
-                    y + (font.ascender-font.descender) * style["panel_label_pt"],
-                ]
             render["style"] = {key: style[key] for key in ("font_family", "panel_label_pt",
                                 "panel_label_weight", "label_offset_x_mm", "label_offset_y_mm")}
+        project = asdict(self.project)
         return {
-            "project": asdict(self.project),
+            "project": project,
             "geometry": geometry,
             "bundle": str(self.bundle or ""),
+            "bundle_dirty": bool(self.bundle and self.saved_digest != project_digest(project)),
             "workspace": str(self.workspace),
+            "workspace_id": self.workspace.name,
+            "workspace_registered": self.registered_workspace,
             "keep_cache": self.keep_cache,
-            "pixels_per_mm": self.display_scale(),
             "style_tokens": TOKENS,
             "style_options": ENUMS,
             "palettes": BUILTINS,
@@ -145,7 +216,9 @@ class Session:
     def refresh(self, panel_ids):
         geometry = Layout(self.project).rects
         requested = participating(self.project, panel_ids)
-        panels = [panel for panel in self.project.panels if panel.id in requested]
+        panels = [panel for panel in self.project.panels if panel.id in requested and has_render_source(panel)]
+        if not panels:
+            return
         scripts = [panel for panel in panels if panel.type in SCRIPT_EXTENSIONS]
         workers = min(MAX_RENDER_WORKERS, os.cpu_count() or 1, len(scripts))
         if workers > 1:
@@ -157,6 +230,11 @@ class Session:
                 self.refresh_panel(panel, geometry[panel.id])
             self.align_renders(scripts, geometry)
         write_json(self.workspace / "cache/index.json", self.renders)
+
+    def refresh_pending(self):
+        rects = Layout(self.project).rects
+        self.refresh([panel.id for panel in self.project.panels
+                      if self.render_state(panel, rects[panel.id], rects)["state"] in {"stale", "error"}])
 
     def refresh_batch(self, panels, geometry, contexts, executor):
         # Only subprocess execution runs concurrently. PDF processing and
@@ -254,18 +332,42 @@ class Session:
                 panel.script = current[panel.id].script
         if project.id != self.project.id:
             raise ValueError("This project is no longer open.")
+        if is_grid(project.layout) and (
+            project.size.width_mm != self.project.size.width_mm or
+            project.size.height_mm != self.project.size.height_mm
+        ):
+            fit_artboard(project)
+        self.store_project(project)
+        return self.state()
+
+    def store_project(self, project, *, write_scripts=False):
         Layout(project)
         validate_style(project)
         validate_groups(project)
+        validate_panel_groups(project)
         for panel in project.panels:
             if panel.asset:
                 asset_path(self.workspace, panel.asset)
-            if panel.type in SCRIPT_EXTENSIONS and not script_path(self.workspace, panel).exists():
+            if (not write_scripts and panel.type in SCRIPT_EXTENSIONS
+                    and not script_path(self.workspace, panel).exists()):
                 atomic_write(script_path(self.workspace, panel),
                              lambda tmp: tmp.write_text(panel.script, encoding="utf-8"))
-        write_workspace(project, self.workspace, write_scripts=False)
+        write_workspace(project, self.workspace, write_scripts=write_scripts)
         self.project = project
-        return self.state()
+
+    def save(self, path=None, *, cache=False):
+        path = Path(path).expanduser() if path else self.bundle
+        if not path:
+            raise ValueError("Choose a .plate file to save.")
+        if path.suffix.lower() != ".plate":
+            path = path.with_suffix(".plate")
+        if cache:
+            write_json(self.workspace / "cache/index.json", self.renders)
+        save_bundle(self.project, self.workspace, path, cache, write_scripts=False)
+        self.bundle = path.resolve()
+        self.keep_cache = bool(cache)
+        self.saved_digest = project_digest(asdict(self.project))
+        self.remember_workspace()
 
     def export(self, data):
         format = data["format"]
@@ -297,20 +399,16 @@ class Session:
         return {"path": str(path.resolve())}
 
     def action(self, endpoint, data):
-        if endpoint == "/api/preview-corner":
-            candidate = apply(self.project, {**data, "kind": "resize-corner"})
-            return {"rects": Layout(candidate).rects}
         sync_scripts(self.project, self.workspace)
-        if endpoint == "/api/calibrate":
-            scale = number(data["pixels_per_mm"], "Pixels per millimetre", 1.5, 12)
-            write_json(self.preferences, {"pixels_per_mm": scale})
-            return {"pixels_per_mm": scale}
         if endpoint == "/api/script":
             source = data["script"]
             if not isinstance(source, str):
                 raise ValueError("Script must be text.")
             result = save_script(self.project, self.workspace, data["panel"], source, data["base"])
-            return result if result["conflict"] else self.state()
+            if result["conflict"]:
+                return result
+            self.remember_workspace()
+            return self.state()
         if endpoint == "/api/reveal-workspace":
             subprocess.run(["/usr/bin/open", str(self.workspace)], check=True, timeout=5)
             return {"path": str(self.workspace)}
@@ -322,16 +420,7 @@ class Session:
         if endpoint == "/api/asset":
             path = Path(data["path"]).expanduser()
             panel = next(panel for panel in self.project.panels if panel.id == data["panel"])
-            extensions = {"image": {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp"},
-                          "vector": {".pdf", ".svg"}}
-            suffix = path.suffix.lower()
-            if suffix not in extensions.get(panel.type, set()):
-                raise ValueError("Choose an asset matching this panel type.")
-            if path.stat().st_size > 150 * 1024 * 1024:
-                raise ValueError("Choose an asset smaller than 150 MB.")
-            content = path.read_bytes()
-            asset = f"assets/{sha256(content).hexdigest()}{suffix}"
-            atomic_write(self.workspace / asset, lambda file: file.write_bytes(content))
+            asset = import_asset(self.workspace, panel.type, path)
             project = asdict(self.project)
             record = next(item for item in project["panels"] if item["id"] == panel.id)
             record["asset"] = asset
@@ -349,10 +438,9 @@ class Session:
         if endpoint == "/api/refresh":
             requested = data.get("panels")
             if requested is None:
-                geometry = Layout(self.project).rects
-                requested = [panel.id for panel in self.project.panels
-                             if self.render_state(panel, geometry[panel.id]).get("state") in {"stale", "error"}]
-            self.refresh(requested)
+                self.refresh_pending()
+            else:
+                self.refresh(requested)
             return self.state()
         if endpoint == "/api/interpreters":
             return discovery(data.get("venvs", []))
@@ -365,28 +453,32 @@ class Session:
             return self.update(data)
         if endpoint == "/api/new":
             self.__init__(workspaces=self.workspaces)
-        elif endpoint == "/api/open":
-            loaded = Session(Path(data["path"]).expanduser(), self.workspaces)
+            self.remember_workspace()
+        elif endpoint in {"/api/open", "/api/resume"}:
+            if endpoint == "/api/open":
+                loaded = Session(Path(data["path"]).expanduser(), self.workspaces)
+            else:
+                name = data["workspace"]
+                if not isinstance(name, str) or not name or Path(name).name != name or name in {".", ".."}:
+                    raise ValueError("Invalid workspace.")
+                workspace = self.workspaces / name
+                if workspace.is_symlink() or not workspace.is_dir():
+                    raise ValueError("This workspace is no longer available.")
+                loaded = Session(workspaces=self.workspaces, workspace=workspace)
+                loaded.remember_workspace()
+            loaded.initialize_native_panels()
             self.project, self.workspace, self.bundle = loaded.project, loaded.workspace, loaded.bundle
             self.renders, self.keep_cache = loaded.renders, loaded.keep_cache
-            self.initialize_native_panels()
+            self.saved_digest = loaded.saved_digest
+            self.registered_workspace = loaded.registered_workspace
         elif endpoint == "/api/save":
-            path = Path(data["path"]).expanduser() if data.get("path") else self.bundle
-            if not path:
-                raise ValueError("Choose a .plate file to save.")
-            if path.suffix.lower() != ".plate":
-                path = path.with_suffix(".plate")
-            if data.get("cache"):
-                write_json(self.workspace / "cache/index.json", self.renders)
-            save_bundle(self.project, self.workspace, path, data.get("cache", False), write_scripts=False)
-            self.bundle = path.resolve()
-            self.keep_cache = bool(data.get("cache"))
+            self.save(data.get("path"), cache=data.get("cache", False))
         else:
             raise ValueError("Unknown project action.")
         return self.state()
 
     def update_layout(self, data):
-        project = apply(self.project, data)
+        project = apply_grid(self.project, data)
         auto_render = data.get("auto_render", False)
         if auto_render:
             previous_rects = Layout(self.project).rects
@@ -403,8 +495,7 @@ class Session:
                 panel.id for panel in self.project.panels
                 if result["renders"][panel.id]["state"] != "fresh"
                 and (panel.type not in SCRIPT_EXTENSIONS or panel.script.strip())
-                and (rects[panel.id] != previous_rects.get(panel.id)
-                     or self.panel_signature(panel, rects[panel.id], rects) != before.get(panel.id))
+                and self.panel_signature(panel, rects[panel.id], rects) != before.get(panel.id)
             ]
         return result
 
@@ -435,18 +526,32 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.allowed():
             return
-        path = urlsplit(self.path).path
+        url = urlsplit(self.path)
+        path = url.path
         if path.startswith("/preview/"):
             key = path.removeprefix("/preview/")
             if len(key) != 64 or not SAFE_ID.fullmatch(key):
                 self.send_error(404)
                 return
-            with self.server.session.lock:
-                preview = self.server.session.workspace / "cache" / f"{key}.png"
-                if not preview.is_file():
-                    self.send_error(404)
-                    return
-                self.send(preview.read_bytes(), "image/png")
+            workspace = self.server.session.workspace
+            preview = workspace / "cache" / f"{key}.png"
+            variants = {f"dpi={dpi}": dpi for dpi in PREVIEW_DPI[1:]}
+            if url.query in variants:
+                dpi = variants[url.query]
+                source = preview.with_suffix(".pdf")
+                variant = workspace / "previews" / f"{key}-{dpi}.png"
+                with PREVIEW_LOCK:
+                    if source.is_file() and not variant.is_file():
+                        try:
+                            make_preview(source, variant, dpi)
+                        except (OSError, RuntimeError, ValueError):
+                            pass
+                if variant.is_file():
+                    preview = variant
+            if not preview.is_file():
+                self.send_error(404)
+                return
+            self.send(preview.read_bytes(), "image/png")
         elif path == "/api/scripts":
             with self.server.session.lock:
                 session = self.server.session
@@ -459,6 +564,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/project":
             with self.server.session.lock:
                 self.json(self.server.session.state())
+        elif path == "/api/projects":
+            self.json(project_library(self.server.session.workspaces))
         elif path == "/api/presets":
             self.json(presets())
         else:

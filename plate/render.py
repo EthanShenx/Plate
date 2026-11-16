@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
+from itertools import chain
 import json
 import math
 import os
@@ -15,12 +16,15 @@ from tempfile import TemporaryDirectory
 from time import monotonic
 
 from .bundle import script_path, write_json, atomic_write
+from .checks import text_collisions
 from .interpreters import interpreter, login_path, probe
 from .style import HELPERS, PT_PER_MM, context_for
 
 WORKERS = Path(__file__).parent / "workers"
 ABSOLUTE_PATH = re.compile(r"""['"](?:/(?!/)|[A-Za-z]:[\\/]|~/)""")
-ENGINE_VERSION = 2
+ENGINE_VERSION = 4
+PREVIEW_DPI = (130, 260, 520, 1040)
+MAX_PREVIEW_PIXELS = 12_000_000
 
 
 def signature(project, panel, rect, context=None, path=None, version=None):
@@ -52,7 +56,9 @@ def pdf_metadata(path):
             w, h = math.hypot(a, b), math.hypot(c, d)
             if w and h:
                 dpi.append(min(image["width"] * 72 / w, image["height"] * 72 / h))
-        return {"text": text, "page_pt": [page.rect.width, page.rect.height], "effective_dpi": dpi}
+        collisions, count = text_collisions(page)
+        return {"text": text, "page_pt": [page.rect.width, page.rect.height], "effective_dpi": dpi,
+                "text_collisions": collisions, "text_collision_count": count}
 
 
 def normalize_r_pdf(path, size_mm):
@@ -77,11 +83,55 @@ def normalize_r_pdf(path, size_mm):
     path.write_bytes(changed)
 
 
-def make_preview(pdf_path, png_path):
+def fit_pdf_text(path, axes=None):
+    """Contain remaining page overflow, including figure-level text and base R."""
+    import pymupdf
+
+    with pymupdf.open(path) as document:
+        if document.page_count != 1:
+            return axes, False
+        page = document[0]
+        frame = page.rect
+        bounds = pymupdf.Rect(frame)
+        for kind, bbox in page.get_bboxlog():
+            if kind in {"fill-text", "stroke-text"}:
+                bounds |= pymupdf.Rect(bbox)
+        if bounds == frame:
+            return axes, False
+        margin = 1
+        scale = min((frame.width - 2*margin) / bounds.width,
+                    (frame.height - 2*margin) / bounds.height)
+        x = (frame.width - scale*bounds.width) / 2 - scale*bounds.x0
+        y = (frame.height - scale*bounds.height) / 2 - scale*bounds.y0
+        # MuPDF bounds run down from the top, while PDF drawing coordinates run up.
+        ty = frame.height * (1-scale) - y
+        page.wrap_contents()
+        wrappers = []
+        for data in (f"q {scale:.10f} 0 0 {scale:.10f} {x:.8f} {ty:.8f} cm\n".encode(), b"\nQ\n"):
+            ref = document.get_new_xref()
+            document.update_object(ref, "<<>>")
+            document.update_stream(ref, data)
+            wrappers.append(ref)
+        contents = [wrappers[0], *page.get_contents(), wrappers[1]]
+        document.xref_set_key(page.xref, "Contents", "[" + " ".join(f"{ref} 0 R" for ref in contents) + "]")
+        result = document.tobytes(garbage=3)
+        if axes:
+            axes = [scale*value + (x/frame.width if index % 2 == 0 else ty/frame.height)
+                    for index, value in enumerate(axes)]
+    path.write_bytes(result)
+    return axes, True
+
+
+def preview_dpi(width_pt, height_pt, requested):
+    return max(1, min(requested, int(72 * math.sqrt(MAX_PREVIEW_PIXELS / (width_pt * height_pt)))))
+
+
+def make_preview(pdf_path, png_path, dpi=PREVIEW_DPI[0]):
     import pymupdf
 
     with pymupdf.open(pdf_path) as pdf:
-        pixmap = pdf[0].get_pixmap(dpi=130, alpha=True)
+        page = pdf[0]
+        pixmap = page.get_pixmap(dpi=preview_dpi(page.rect.width, page.rect.height, dpi), alpha=True)
         atomic_write(png_path, lambda path: path.write_bytes(pixmap.tobytes("png")))
 
 
@@ -116,10 +166,11 @@ def data_directory(project, workspace, bundle):
 
 
 def seed_matplotlib_cache(cache, workspaces):
-    """Carry forward font inventories from Plate versions that stored them per project."""
+    """Reuse Plate's shared font inventory or an older project-local one."""
     if any(cache.glob("fontlist-*.json")):
         return
-    for source in workspaces.glob("*/matplotlib/fontlist-*.json"):
+    for source in chain((workspaces.parent / "matplotlib").glob("fontlist-*.json"),
+                        workspaces.glob("*/matplotlib/fontlist-*.json")):
         destination = cache / source.name
         if not destination.exists():
             atomic_write(destination, lambda tmp: shutil.copyfile(source, tmp))
@@ -147,10 +198,10 @@ def prepare_script(project, panel, rect, workspace, bundle, context=None, *, mat
         info = probe(path, panel.type, refresh=True)
     if info["missing"]:
         raise RenderError("Missing packages: " + ", ".join(info["missing"]), stderr=info["install"])
-    cwd = data_directory(project, workspace, bundle)
+    cwd = data_directory(project, workspace, bundle).resolve()
     if not cwd.is_dir():
         raise RenderError(f"Data root does not exist: {cwd}")
-    key = signature(project, panel, rect, context, path, info["version"] + str(cwd.resolve()))
+    key = signature(project, panel, rect, context, path, info["version"] + str(cwd))
     cache = workspace / "cache"
     cache.mkdir(exist_ok=True)
     output, preview, record = [cache / f"{key}.{ext}" for ext in ("pdf", "png", "json")]
@@ -185,8 +236,9 @@ def prepare_script(project, panel, rect, workspace, bundle, context=None, *, mat
             try:
                 if panel.type == "script-r":
                     normalize_r_pdf(pdf, context["size_mm"])
-                parsed = pdf_metadata(pdf)
-                parsed.update(json.loads(metadata.read_text()))
+                layout = json.loads(metadata.read_text())
+                layout["axes"], fitted = fit_pdf_text(pdf, layout.get("axes"))
+                parsed = {**pdf_metadata(pdf), **layout}
                 if any(abs(mm * PT_PER_MM - pt) > 0.01 * PT_PER_MM
                        for mm, pt in zip(context["size_mm"], parsed["page_pt"], strict=True)):
                     raise ValueError("Plot device did not produce the requested physical size.")
@@ -201,6 +253,8 @@ def prepare_script(project, panel, rect, workspace, bundle, context=None, *, mat
                 "warnings": ["Script contains an absolute path."] if ABSOLUTE_PATH.search(panel.script) else [],
                 "metadata": parsed,
             }
+            if fitted:
+                result["warnings"].append("Content was scaled to fit the panel. Enlarge the panel to keep the requested font sizes.")
             write_json(record, result)
             return result
 

@@ -1,4 +1,4 @@
-"""Guillotine layout in millimetres with recursive minimum and fixed spans."""
+"""Figure geometry and the legacy split-tree layout."""
 
 from copy import deepcopy
 from dataclasses import dataclass
@@ -47,12 +47,15 @@ def check_span(span, size):
 
 class Layout:
     def __init__(self, project):
+        from .grid import DEFAULT_GRID_STEP, is_grid, validate_rect
+
         self.project = project
         self.gutter = number(project.style.get("gutter_mm", 3), "Gutter")
         self.margin = number(project.style.get("margin_mm", 4), "Margin")
         self.minimum = number(project.size.minimum_mm, "Minimum panel size", 1)
         self.width = number(project.size.width_mm, "Width", 1)
         self.height = number(project.size.height_mm, "Height", 1)
+        self.grid_step = DEFAULT_GRID_STEP
         self.panels = {panel.id: panel for panel in project.panels}
         self.rects = {}
         self.handles = {}
@@ -63,7 +66,16 @@ class Layout:
             panel.type not in PANEL_TYPES for panel in project.panels
         ):
             raise ValueError("Invalid or duplicate panels.")
-        if project.layout:
+        if is_grid(project.layout):
+            self.grid_step = number(project.layout.get("step_mm", DEFAULT_GRID_STEP), "Grid spacing", .5, 20)
+            stored = project.layout.get("rects")
+            if not isinstance(stored, dict) or stored.keys() != self.panels.keys():
+                raise ValueError("Panel list and layout must contain the same panels.")
+            self.rects = {
+                panel_id: validate_rect(stored[panel_id], panel, self.width, self.height, self.minimum).copy()
+                for panel_id, panel in self.panels.items()
+            }
+        elif project.layout:
             self.measure(project.layout)
             self.place(project.layout, self.margin, self.margin,
                        self.width - 2 * self.margin, self.height - 2 * self.margin)
@@ -151,6 +163,7 @@ class Layout:
     def view(self):
         return {
             "rects": self.rects,
+            "grid_step": self.grid_step,
             "handles": {key: {field: value for field, value in handle.items()
                               if field not in {"sizes", "split", "index"}}
                         for key, handle in self.handles.items()},

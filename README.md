@@ -1,6 +1,6 @@
 # Plate
 
-Plate is a local macOS workbench for assembling publication figures from R and Python scripts, images, imported vectors, text and legends. Each plot renders at its final physical size. The project holds a common style and a layout that retiles as panels move.
+Plate is a local macOS workbench for assembling publication figures from R and Python scripts, images, imported vectors, text and legends. Each plot renders at its final physical size. Panels sit independently on a shared artboard.
 
 ## Start on macOS 13 or later
 
@@ -10,7 +10,7 @@ Install Python 3.10 or later, Node.js 20 or later, and the macOS command-line to
 make run
 ```
 
-The command installs the app dependencies in this checkout, builds CodeMirror and opens your browser. Plate listens on a randomly selected loopback port. Run scripts and open bundles from sources you trust, since the interpreters run with your permissions.
+The command installs the app dependencies in this checkout, builds CodeMirror and opens the workspace in your browser. To open it in another tab, use the `http://127.0.0.1:…` address printed in Terminal. Keep the command running while you use Plate. Run scripts and open bundles from sources you trust, since the interpreters run with your permissions.
 
 For the default environment and the sample project, install the plotting packages once.
 
@@ -23,14 +23,20 @@ Use `brew install librsvg` if you plan to import SVG. If **Dependencies** report
 
 ## Five-minute tutorial
 
-1. Run `make run BUNDLE=examples/nature-double.plate` and choose **Refresh all stale**. The 183 × 123 mm project contains four plot scripts, a synthetic microscopy image and a shared legend.
-2. Hover over or select a panel to reveal its four corners. Drag a corner to move the adjacent shared edges together, or drag a gutter to adjust one edge. The outer margins stay fixed. Drag the panel body onto an edge target to insert it beside another panel, or onto a centre target to swap them. Plate refreshes affected panels when you release a drag. The geometry inspector offers numeric edits and width or height locks.
-3. Click the paper margin to open global settings. Change a font role, stroke or semantic colour, then refresh. Stale script previews stay visible. Select a panel to edit its label, opt out of style injection or override individual tokens.
-4. Select a script panel and edit it in CodeMirror. **Run** saves and refreshes it. **Reveal script** shows the live workspace file in Finder. Changes saved in an external editor reload into CodeMirror. Use **Checks** to locate print-size warnings.
-5. Use **Save** to write a `.plate` bundle and optionally include previews. Choose **Export** for an editable PDF or an RGB TIFF/PNG at 300, 600 or 1200 dpi. Use a different save path to keep the bundled sample available for future tutorials.
+1. Run `make run BUNDLE=examples/nature-double.plate`. The 183 × 123 mm project contains four plot scripts, a synthetic microscopy image and a shared legend. Plate renders any out-of-date panels automatically.
+2. Drag a panel to move it. Drag any corner to resize it against the opposite corner. Both gestures snap to the artboard grid, which defaults to 2 mm. Change **Grid spacing (mm)** in Figure settings. To enter exact positions or sizes, use the panel’s **Geometry** section. Adjust stacking under **Arrange**.
+3. Open **Figure settings** to change a font role, stroke or group colour. Select a panel to edit its label or change its style settings. Previous previews stay visible while Plate renders the changes.
+4. Select a script panel and choose **Edit script**. **Run** saves and renders it. Choose **More → Show script in Finder** to locate the live workspace file. Changes saved in an external editor reload into CodeMirror. Use **Checks** to locate print-size warnings.
+5. Choose **File → Save as…** to save a separate `.plate` bundle and optionally include previews. **Save** writes subsequent changes to that bundle. Choose **Export** for an editable PDF or an RGB TIFF/PNG at 300, 600 or 1200 dpi.
 
-**⌘ Enter** runs the selected script. **⌘ Shift Enter** refreshes stale panels. **⌘ Z** and **⌘ Shift Z** undo and redo figure changes. CodeMirror has its own text history. **Actual size** uses a 50 mm calibration ruler. Recalibrate after changing display scale or browser zoom.
+Pinch over the canvas to zoom. **Fit** fits the figure to the workspace and **100%** resets the display scale. **⌘ Enter** refreshes the selected panel and **⌘ Shift Enter** refreshes all out-of-date panels. **⌘ Z** and **⌘ Shift Z** undo and redo figure changes. CodeMirror has its own text history.
 
-A `.plate` file contains layout, styles, scripts and imported figure assets. Data files loaded by scripts stay in their original locations. Set **Runtime → Data root** or place your data relative to the bundle directory. Use the Finder workspace shortcut to inspect extracted project files and logs. The script contract covers plotting, styling and running the helpers outside Plate.
+Drag from empty canvas space to select several panels, or Shift-click panels to add or remove them. Drag a selected panel to move the selection, or drag a selection corner to scale it. In **Selection geometry**, use **Set panel sizes** to give each panel the same width or height. Press **Esc** to clear the selection.
+
+A `.plate` file contains layout, styles, scripts and imported figure assets. Data files loaded by scripts stay in their original locations. Set **Advanced → Data folder** or place your data relative to the bundle directory. Use **File → Show workspace in Finder** to inspect extracted project files and logs. The script contract covers plotting, styling and running the helpers outside Plate.
 
 Run the local test suite with `make test` after installing the plotting prerequisites. The render tests report missing interpreters or plotting packages as skips. See the [script contract](docs/script-contract.md), [architecture](ARCHITECTURE.md) and [export acceptance checklist](docs/ACCEPTANCE.md).
+
+## Command-line authoring
+
+Use `.venv/bin/python -m plate build`, `inspect`, `apply` and `export` to assemble and revise figures from scripts and JSON. The commands return JSON geometry and print checks that an agent can use to make the next edit. [Command reference and specification example](docs/cli.md)

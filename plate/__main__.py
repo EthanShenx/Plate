@@ -1,13 +1,20 @@
 from argparse import ArgumentParser
 import logging
 from pathlib import Path
+import sys
 import webbrowser
 
+from . import cli
 from .server import WORKSPACES, make_server
 
 
 def main():
-    parser = ArgumentParser(description="Open Plate in your browser.")
+    if len(sys.argv) > 1 and sys.argv[1] in cli.COMMANDS:
+        return cli.main(sys.argv[1:])
+    parser = ArgumentParser(
+        description="Open Plate in your browser.",
+        epilog="For headless use, run build, apply, inspect or export with --help.",
+    )
     parser.add_argument("bundle", nargs="?")
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--workspaces", type=Path, default=WORKSPACES, help="Override the workspace directory.")
@@ -33,4 +40,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

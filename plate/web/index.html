@@ -3,60 +3,171 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Plate · Figure workspace</title>
-  <link rel="stylesheet" href="/plate.css">
+  <meta name="theme-color" content="#fafafa">
+  <title>Plate</title>
+  <link rel="icon" href="./plate-mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./plate.css">
+  <script>
+    if (location.protocol === "file:") document.documentElement.classList.add("file-launch");
+  </script>
 </head>
 <body>
+<main id="launch-help">
+  <h1 class="brand" translate="no"><img class="brand-mark" src="./plate-mark.svg" alt="">Plate</h1>
+  <h2>Start Plate from Terminal</h2>
+  <p>Run this command from the Plate folder. It starts the local server and opens the workspace in your browser.</p>
+  <pre><code>make run</code></pre>
+</main>
+<a class="skip-link" href="#home">Skip to content</a>
 <header class="toolbar">
-  <span class="brand"><i aria-hidden="true"></i>Plate</span>
-  <input id="project-name" aria-label="Project name">
+  <button id="home-button" class="brand" title="Project home" translate="no">
+    <img class="brand-mark" src="./plate-mark.svg" alt="">Plate
+  </button>
+  <div class="project-crumb" hidden>
+    <svg class="icon" aria-hidden="true"><use href="./icons.svg#chevron"/></svg>
+    <input id="project-name" aria-label="Project name" name="project-name" autocomplete="off" spellcheck="false">
+  </div>
   <div class="spacer"></div>
-  <button id="refresh-all" title="⌘⇧Enter">Refresh all stale</button><button id="new">New</button><button id="open">Open</button><button id="save">Save</button><button id="export" class="primary">Export</button>
+  <button id="return-to-editor" class="quiet" hidden>Back to editor<svg class="icon" aria-hidden="true"><use href="./icons.svg#arrow"/></svg></button>
+  <div class="project-actions" hidden>
+    <button id="file-menu" class="quiet" popovertarget="file-actions">File</button>
+    <div id="file-actions" class="popover" popover>
+      <button id="new">New project</button>
+      <button id="open">Open project…</button>
+      <button id="save-as">Save as…</button>
+      <button id="project-folder">Show workspace in Finder</button>
+    </div>
+    <button id="save" class="quiet" aria-keyshortcuts="Meta+S Control+S"><svg class="icon" aria-hidden="true"><use href="./icons.svg#save"/></svg>Save</button>
+    <button id="export" class="primary"><svg class="icon" aria-hidden="true"><use href="./icons.svg#export"/></svg>Export</button>
+  </div>
 </header>
-<main>
-  <aside class="navigator"><h2>Project</h2><button id="project-folder" class="project-folder">Workspace files</button><h2>Panels</h2><div class="add-row"><select id="panel-type" aria-label="Panel type"><option value="script-py">Python</option><option value="script-r">R</option><option value="image">Image</option><option value="vector">Vector</option><option value="text">Text</option><option value="legend">Legend</option></select><button id="add">Add</button></div><div id="panel-list"></div></aside>
-  <section class="stage" aria-label="Figure canvas">
-    <div class="stage-bar"><span id="measure"></span><span class="spacer"></span><button id="undo">Undo</button><button id="redo">Redo</button><button id="fit-view">Fit</button><button id="actual-size">Actual size</button><button id="calibrate" aria-label="Calibrate actual size" title="Calibrate actual size">Ruler</button><button id="zoom-out" aria-label="Zoom out">−</button><button id="zoom-in" aria-label="Zoom in">+</button></div>
-    <div class="viewport"><div id="frame"></div></div>
-  <section id="script-drawer" class="script-drawer" aria-label="Script editor" hidden>
-      <div class="editor-bar">
-        <strong id="editor-title">Script</strong><span id="editor-status"></span><span class="spacer"></span>
-        <button id="dependencies">Dependencies</button><button id="reveal-script">Reveal script</button>
-        <button id="save-script">Save script</button><button id="run-script" class="primary">Run</button>
+<main id="home" class="home" tabindex="-1" aria-labelledby="home-title">
+  <div class="home-content">
+    <div class="home-heading">
+      <div>
+        <h1 id="home-title">Projects</h1>
+        <p>Your figures and drafts on this Mac.</p>
       </div>
-      <div id="script-editor"></div><pre id="console" class="console" aria-label="Render console"></pre>
+      <div class="home-actions">
+        <button id="home-open" disabled><svg class="icon" aria-hidden="true"><use href="./icons.svg#folder"/></svg>Open file</button>
+        <button id="home-new" class="primary" disabled><svg class="icon" aria-hidden="true"><use href="./icons.svg#plus"/></svg>New project</button>
+      </div>
+    </div>
+    <div id="project-library" aria-busy="true"><p class="library-message" role="status">Loading projects…</p></div>
+  </div>
+</main>
+<main id="workspace" tabindex="-1" hidden>
+  <aside id="navigator" class="navigator" aria-label="Figure and panels">
+    <button id="figure-settings" class="panel-row figure-settings" aria-pressed="true"><svg class="icon" aria-hidden="true"><use href="./icons.svg#sliders"/></svg>Figure settings</button>
+    <div class="navigator-heading">
+      <h2>Panels</h2>
+      <button id="add" class="icon-button quiet" popovertarget="panel-types" aria-label="Add panel" title="Add panel"><svg class="icon" aria-hidden="true"><use href="./icons.svg#plus"/></svg></button>
+    </div>
+    <div id="panel-types" class="popover" popover aria-label="Panel types"></div>
+    <button id="group-panels" hidden>Group selected panels</button>
+    <div id="panel-list"></div>
+  </aside>
+  <div class="sidebar-divider" role="separator" tabindex="0" aria-orientation="vertical" aria-label="Panels width" aria-controls="navigator" data-side="left"></div>
+  <section class="stage" aria-label="Figure canvas">
+    <div class="stage-bar">
+      <span id="measure"></span>
+      <span class="spacer"></span>
+      <div class="control-group" aria-label="Layout history" role="group">
+        <button id="undo" class="icon-button quiet" aria-label="Undo" title="Undo (⌘Z)"><svg class="icon" aria-hidden="true"><use href="./icons.svg#undo"/></svg></button>
+        <button id="redo" class="icon-button quiet" aria-label="Redo" title="Redo (⌘⇧Z)"><svg class="icon" aria-hidden="true"><use href="./icons.svg#redo"/></svg></button>
+        <button id="delete-panel" class="quiet danger" aria-label="Delete panel" aria-keyshortcuts="Delete Backspace" title="Delete selected panel" disabled><svg class="icon" aria-hidden="true"><use href="./icons.svg#trash"/></svg>Delete</button>
+      </div>
+      <div class="control-group" aria-label="Canvas view" role="group">
+        <button id="fit-view">Fit</button>
+        <button id="fit-width" title="Fit figure to canvas width">Fit width</button>
+        <button id="actual-size" title="Reset to 100%">100%</button>
+        <button id="show-grid" class="icon-button quiet" aria-label="Show grid lines" aria-pressed="true" title="Show grid lines"><svg class="icon" aria-hidden="true"><use href="./icons.svg#grid"/></svg></button>
+        <button id="zoom-out" class="icon-button quiet" aria-label="Zoom out" title="Zoom out"><svg class="icon" aria-hidden="true"><use href="./icons.svg#minus"/></svg></button>
+        <button id="zoom-in" class="icon-button quiet" aria-label="Zoom in" title="Zoom in"><svg class="icon" aria-hidden="true"><use href="./icons.svg#plus"/></svg></button>
+      </div>
+    </div>
+    <div class="viewport" role="group" tabindex="-1" aria-label="Artboard" aria-description="Drag from empty space to select panels. Shift-click to add or remove individual panels."><div id="frame" class="show-grid">
+      <div id="empty-canvas" class="empty" hidden>
+        <svg class="icon" aria-hidden="true"><use href="./icons.svg#figure"/></svg>
+        <p>Add a panel to start your figure.</p>
+        <button id="empty-add" popovertarget="panel-types"><svg class="icon" aria-hidden="true"><use href="./icons.svg#plus"/></svg>Add panel</button>
+      </div>
+      <div id="panel-handles" hidden></div>
+      <div id="group-outline" hidden></div>
+      <div id="selection-marquee" aria-hidden="true" hidden></div>
+    </div></div>
+    <div class="canvas-footer">
+      <button id="refresh-selected" hidden>Refresh panel</button>
+      <button id="refresh-all" class="quiet" title="Refresh panels that need rendering (⌘⇧Enter)"><svg class="icon" aria-hidden="true"><use href="./icons.svg#refresh"/></svg><span>Refresh panels</span></button>
+    </div>
+    <section id="script-drawer" class="script-drawer" aria-label="Script editor" hidden>
+      <div class="editor-bar">
+        <span id="editor-title">Script</span>
+        <span id="editor-status"></span>
+        <span class="spacer"></span>
+        <button id="script-menu" popovertarget="script-actions">More</button>
+        <div id="script-actions" class="popover" popover>
+          <button id="dependencies">Check dependencies</button>
+          <button id="reveal-script">Show script in Finder</button>
+          <button id="save-script">Save script</button>
+        </div>
+        <button id="run-script" class="primary" title="Save and run (⌘Enter)"><svg class="icon" aria-hidden="true"><use href="./icons.svg#play"/></svg>Run</button>
+        <button id="close-editor" class="icon-button quiet" aria-label="Close script editor" title="Close script editor"><svg class="icon" aria-hidden="true"><use href="./icons.svg#close"/></svg></button>
+      </div>
+      <div id="script-editor"></div>
+      <pre id="console" class="console" aria-label="Render output" aria-live="polite" hidden></pre>
     </section>
   </section>
-  <aside class="inspector"><div class="inspector-tabs"><button id="show-inspector" aria-pressed="true">Inspector</button><button id="show-checks" aria-pressed="false">Checks</button></div><h2 id="inspector-title">Figure settings</h2><div id="settings"></div><div id="checks" hidden></div></aside>
+  <div class="sidebar-divider" role="separator" tabindex="0" aria-orientation="vertical" aria-label="Inspector width" aria-controls="inspector" data-side="right"></div>
+  <aside id="inspector" class="inspector" aria-label="Inspector and checks">
+    <div class="inspector-tabs" aria-label="Inspector view" role="group">
+      <button id="show-inspector" aria-pressed="true" aria-controls="settings"><svg class="icon" aria-hidden="true"><use href="./icons.svg#sliders"/></svg>Inspector</button>
+      <button id="show-checks" aria-pressed="false" aria-controls="checks"><svg class="icon" aria-hidden="true"><use href="./icons.svg#check"/></svg>Checks<span id="check-count" hidden></span></button>
+    </div>
+    <div id="inspector-content">
+      <header id="inspector-heading">
+        <p id="inspector-type" hidden></p>
+        <h2 id="inspector-title">Figure settings</h2>
+        <p id="render-failure" role="status" hidden></p>
+      </header>
+      <div id="settings"></div>
+      <div id="checks" hidden></div>
+    </div>
+  </aside>
 </main>
-<footer id="status" role="status"></footer>
-<dialog id="save-dialog">
+<footer id="status" role="status">Loading project…</footer>
+<dialog id="input-dialog" aria-labelledby="input-title">
+  <form id="input-form">
+    <h2 id="input-title"></h2>
+    <label class="field"><span id="input-label"></span><input id="input-value" name="value" required autocomplete="off" spellcheck="false"></label>
+    <p id="input-error" class="form-error" role="status" hidden></p>
+    <div class="dialog-actions"><button type="button" id="cancel-input">Cancel</button><button type="submit" class="primary"></button></div>
+  </form>
+</dialog>
+<dialog id="save-dialog" aria-labelledby="save-title">
   <form id="save-form">
-    <h2>Save project</h2>
-    <label class="field">Bundle path<input id="bundle-path" required placeholder="/path/to/figure.plate"></label>
-    <label class="cache-option"><input id="bundle-cache" type="checkbox"> Include rendered previews</label>
+    <h2 id="save-title">Save project</h2>
+    <label class="field">Project path<input id="bundle-path" name="project-path" required placeholder="/path/to/figure.plate" autocomplete="off" spellcheck="false"></label>
+    <label class="field checkbox"><input id="bundle-cache" name="include-previews" type="checkbox">Include rendered previews</label>
+    <p id="save-error" class="form-error" role="status" hidden></p>
     <div class="dialog-actions"><button type="button" id="cancel-save">Cancel</button><button type="submit" class="primary">Save</button></div>
   </form>
 </dialog>
-<dialog id="calibration-dialog">
-  <form id="calibration-form">
-    <h2>Calibrate actual size</h2>
-    <p>Adjust until the distance between the end marks measures 50 mm on a physical ruler.</p>
-    <div class="ruler-viewport"><div id="calibration-ruler"></div></div>
-    <label class="field">Ruler scale<input id="calibration-scale" type="range" min="1.5" max="12" step=".01"></label>
-    <div class="dialog-actions"><button type="button" id="cancel-calibrate">Cancel</button><button type="submit" class="primary">Use this scale</button></div>
-  </form>
-</dialog>
-<dialog id="export-dialog">
+<dialog id="export-dialog" aria-labelledby="export-title">
   <form id="export-form">
-    <h2>Export figure</h2>
-    <label class="field">Format<select id="export-format"><option value="pdf">Editable PDF</option><option value="png">PNG</option><option value="tiff">TIFF</option></select></label>
-    <label class="field" id="dpi-field">Resolution<select id="export-dpi"><option>300</option><option>600</option><option>1200</option></select></label>
-    <label class="field">Save to<input id="export-path" required placeholder="/path/to/figure.pdf"></label>
-    <p id="export-warnings" role="status"></p>
+    <h2 id="export-title">Export figure</h2>
+    <div class="field-grid">
+      <label class="field">Format<select id="export-format" name="format"><option value="pdf">Editable PDF</option><option value="png">PNG</option><option value="tiff">TIFF</option></select></label>
+      <label class="field" id="dpi-field">Resolution (dpi)<select id="export-dpi" name="resolution"><option>300</option><option>600</option><option>1200</option></select></label>
+    </div>
+    <label class="field">Save to<input id="export-path" name="export-path" required placeholder="/path/to/figure.pdf" autocomplete="off" spellcheck="false"></label>
+    <button id="export-warnings" class="warning-link" type="button" hidden></button>
+    <p id="export-error" class="form-error" role="status" hidden></p>
     <div class="dialog-actions"><button type="button" id="cancel-export">Cancel</button><button type="submit" class="primary">Export</button></div>
   </form>
 </dialog>
-<script type="module" src="/app.js"></script>
+<script type="module">
+  if (location.protocol !== "file:") import("./app.js");
+</script>
 </body>
 </html>

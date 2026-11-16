@@ -52,6 +52,55 @@ if (plate$inject) {
   options(ggplot2.discrete.colour = plate$palette, ggplot2.discrete.fill = plate$palette)
 }
 
+apply_overrides <- function(plot) {
+  keys <- unlist(plate$overrides)
+  if (!plate$inject || !length(keys)) return(plot)
+  roles <- c(axis.title = "axis_title_pt", axis.text = "tick_label_pt",
+             legend.title = "legend_title_pt", legend.text = "legend_text_pt",
+             plot.title = "font_main_pt", strip.text = "tick_label_pt")
+  changes <- list()
+  theme_names <- as.character(names(plot$theme))
+  if ("font_family" %in% keys) changes$text <- element_text(family = family)
+  for (name in names(roles)) {
+    role <- roles[[name]]
+    if (role %in% keys || "font_family" %in% keys) {
+      # Update specific title/tick elements too, e.g. a theme's axis.title.y.
+      specific <- theme_names[startsWith(theme_names, paste0(name, "."))]
+      names_to_update <- c(name, specific)
+      for (element in names_to_update) {
+        if (inherits(plot$theme[[element]], "element_blank")) next
+        changes[[element]] <- element_text(
+          size = if (role %in% keys) s[[role]] else NULL,
+          family = if ("font_family" %in% keys) family else NULL
+        )
+      }
+    }
+  }
+  for (key in intersect(keys, c("spines", "line_axis_pt", "grid", "background",
+                               "tick_width_pt", "tick_length_pt", "tick_direction"))) {
+    names_to_update <- switch(key, spines = c("axis.line", "panel.border"),
+      line_axis_pt = c("axis.line", "panel.border"), grid = c("panel.grid.major", "panel.grid.minor"),
+      background = c("panel.background", "plot.background"), tick_width_pt = "axis.ticks",
+      "axis.ticks.length")
+    changes[names_to_update] <- elements[names_to_update]
+  }
+  plot <- plot + do.call(theme, changes)
+  for (i in seq_along(plot$layers)) {
+    layer <- plot$layers[[i]]
+    is_mapped <- function(name) !is.null(layer$mapping[[name]]) ||
+      (layer$inherit.aes && !is.null(plot$mapping[[name]]))
+    set_param <- function(name, value) {
+      if (!is_mapped(name) && name %in% names(layer$geom$default_aes)) layer$aes_params[[name]] <- value
+    }
+    text_geom <- inherits(layer$geom, c("GeomText", "GeomLabel"))
+    if ("annotation_pt" %in% keys && text_geom) set_param("size", text_mm(s$annotation_pt))
+    if ("font_family" %in% keys && text_geom) set_param("family", family)
+    if ("marker_size_pt" %in% keys && inherits(layer$geom, "GeomPoint")) set_param("size", text_mm(s$marker_size_pt))
+    if ("line_data_pt" %in% keys) set_param("linewidth", linewidth(s$line_data_pt))
+  }
+  plot
+}
+
 size <- plate$size_mm / 25.4
 grDevices::cairo_pdf(output, width = size[[1]], height = size[[2]],
                      pointsize = if (plate$inject) s$font_main_pt else 12,
@@ -141,7 +190,12 @@ tryCatch({
   plot <- if (inherits(candidate, "ggplot")) candidate else last
   if (!is.null(plot)) {
     grid::grid.newpage()
+    plot <- apply_overrides(plot)
+    # Cairo rounds each side of the device to whole points. Reserve a small
+    # additional inset around ggplot text for PDF font bearings and rounding.
     table <- if (inherits(plot, "patchwork")) patchwork::patchworkGrob(plot) else ggplotGrob(plot)
+    inset <- grid::unit(2, "bigpts")
+    table <- gtable::gtable_add_padding(table, inset)
     target <- plate$fixed_axes
     if (!is.null(target)) {
       # Measure with an independent recording device. The output device receives

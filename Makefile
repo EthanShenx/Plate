@@ -13,14 +13,15 @@ setup: .venv/.plate-dependencies editor
 	.venv/bin/python -m pip install -r requirements.txt
 	touch $@
 
-editor: plate/web/vendor/editor.js
+editor: plate/web/vendor/.plate-build
 
 node_modules/.plate-dependencies: package.json package-lock.json
 	npm ci --no-audit --no-fund
 	touch $@
 
-plate/web/vendor/editor.js: plate/web/editor.js node_modules/.plate-dependencies
+plate/web/vendor/.plate-build: plate/web/editor.js plate/web/projects.jsx $(wildcard plate/web/smoothui/*.ts*) node_modules/.plate-dependencies
 	npm run build
+	touch $@
 
 test:
 	$(APP_PYTHON) -m unittest discover -s tests -v

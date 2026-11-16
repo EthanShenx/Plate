@@ -3,13 +3,19 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "esbuild plate/web/editor.js --bundle --format=esm --minify --outfile=plate/web/vendor/editor.js"
+    "build": "esbuild plate/web/editor.js plate/web/projects.jsx --bundle --format=esm --jsx=automatic --minify --outdir=plate/web/vendor && cp node_modules/@fontsource-variable/instrument-sans/files/instrument-sans-latin-wght-normal.woff2 plate/web/vendor/"
   },
   "dependencies": {
+    "@base-ui/react": "^1.9.0",
     "@codemirror/lang-python": "^6.2.1",
     "@codemirror/language": "^6.11.3",
     "@codemirror/legacy-modes": "^6.5.1",
-    "codemirror": "^6.0.2"
+    "@fontsource-variable/instrument-sans": "^5.3.0",
+    "@lezer/highlight": "^1.2.5",
+    "codemirror": "^6.0.2",
+    "motion": "^14.14.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
     "esbuild": "^0.25.12"

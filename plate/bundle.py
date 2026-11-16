@@ -1,6 +1,7 @@
 """Versioned workspace documents and atomic ZIP bundles."""
 
 from dataclasses import asdict
+from hashlib import sha256
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -12,6 +13,10 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from .model import SCHEMA_VERSION, SCRIPT_EXTENSIONS, new_id, project_from_dict
 
 SAFE_ID = re.compile(r"[A-Za-z0-9_-]{1,80}\Z")
+ASSET_EXTENSIONS = {
+    "image": {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp"},
+    "vector": {".pdf", ".svg"},
+}
 
 
 def atomic_write(path, write):
@@ -75,6 +80,18 @@ def asset_path(workspace, value):
     if len(asset.parts) != 2 or asset.parts[0] != "assets" or asset.name == ".." or "\\" in value:
         raise ValueError("Invalid asset location.")
     return workspace / asset
+
+
+def import_asset(workspace, kind, path):
+    suffix = path.suffix.lower()
+    if suffix not in ASSET_EXTENSIONS.get(kind, ()):
+        raise ValueError("Choose an asset matching this panel type.")
+    if path.stat().st_size > 150 * 1024 * 1024:
+        raise ValueError("Choose an asset smaller than 150 MB.")
+    content = path.read_bytes()
+    asset = f"assets/{sha256(content).hexdigest()}{suffix}"
+    atomic_write(workspace / asset, lambda file: file.write_bytes(content))
+    return asset
 
 
 def read_workspace(workspace):

@@ -97,3 +97,40 @@ text(.5, .25, "Annotation")
 
     def test_r_round_trip(self):
         self.round_trip("script-r", shutil.which("Rscript"), R)
+
+    def test_panel_override_keeps_narrow_axis_labels_complete(self):
+        sources = {
+            "script-py": (sys.executable, """
+import matplotlib.pyplot as plt
+fig, ax = plt.subplots()
+fig.subplots_adjust(left=.08, bottom=.12)
+ax.plot([0, 1], [0, 1], linewidth=1)
+ax.set_ylabel("Normalised signal", fontsize=6)
+"""),
+            "script-r": (shutil.which("Rscript"), """
+p <- ggplot(data.frame(x=0:1, y=0:1), aes(x, y)) + geom_line(linewidth=.4) +
+  labs(y="Normalised signal") + theme_classic() +
+  theme(axis.title.y=element_text(size=6))
+"""),
+        }
+        for language, (executable, source) in sources.items():
+            with self.subTest(language=language), TemporaryDirectory() as scratch:
+                if not executable or probe(executable, language)["missing"]:
+                    self.skipTest(f"{language} plotting packages unavailable")
+                panel = Panel(type=language, interpreter=executable, script=source,
+                              overrides={"axis_title_pt": 10, "line_data_pt": 2})
+                project = Project(panels=[panel], layout=leaf(panel.id))
+                workspace = Path(scratch)
+                write_workspace(project, workspace)
+                result = render_script(project, panel, {"x": 0, "y": 0, "w": 32, "h": 46}, workspace, None)
+                self.assertFalse(result["warnings"])
+                with pymupdf.open(workspace / "cache" / f"{result['key']}.pdf") as pdf:
+                    page = pdf[0]
+                    spans = result["metadata"]["text"]
+                    title = next(span for span in spans if span["text"] == "Normalised signal")
+                    self.assertAlmostEqual(title["size"], 10, delta=.05)
+                    for kind, bounds in page.get_bboxlog():
+                        if kind == "fill-text":
+                            self.assertTrue(page.rect.contains(pymupdf.Rect(bounds)), bounds)
+                    self.assertTrue(any(abs(item["width"] - 2) < .02 for item in page.get_drawings()
+                                        if item["width"] is not None))

@@ -3,6 +3,7 @@ const { createEditor } = await import("/vendor/editor.js").catch(() => ({
   createEditor(parent, language, source, onChange) {
     const input = document.createElement("textarea");
     input.setAttribute("aria-label", "Panel script");
+    input.spellcheck = false;
     input.value = source;
     input.oninput = () => onChange(input.value);
     parent.append(input);
@@ -12,27 +13,58 @@ const { createEditor } = await import("/vendor/editor.js").catch(() => ({
 let state;
 let editor;
 let editorId;
+let editorOpen = false;
+let hasEditorProject = false;
+let renderLibrary;
+let libraryLoad = 0;
 let interpreters = {};
 const drafts = new Map();
 let journals;
 let selected = null;
+let selectedGroup = null;
+const multiSelection = new Set();
+let selectedCheck = null;
 const CSS_PX_PER_MM = 96 / 25.4;
 let zoom = 3.1;
 let viewMode = "fit";
 let past = [];
 let future = [];
 let busy = false;
+let pendingChange;
+let automaticRefresh;
+let refreshTimer;
 let showChecks = false;
 let dragged = null;
-let cornerDrag = null;
+let draggedType = null;
+let panelGesture = null;
 const panels = new Map();
 const typeNames = {"script-py": "Python", "script-r": "R", image: "Image", vector: "Vector", text: "Text", legend: "Legend"};
+const typeIcons = {"script-py": "code", "script-r": "code", image: "image", vector: "vector", text: "text", legend: "legend"};
+const inspectorIcons = {
+  "Artboard": "figure", "Figure style": "sliders", "Project": "folder",
+  "Typography": "text", "Lines and markers": "line-chart", "Axes": "axes",
+  "Spacing": "ruler", "Colours": "palette", "Advanced": "gear",
+};
+const renderLabels = { stale: "Out of date", rendering: "Rendering…", error: "Render failed" };
 const isScript = panel => panel.type.startsWith("script-");
-const edgeNames = ["left", "right", "top", "bottom"];
 const corners = {
   "top-left": ["left", "top"], "top-right": ["right", "top"],
   "bottom-left": ["left", "bottom"], "bottom-right": ["right", "bottom"],
 };
+
+function renderFailure(render) {
+  if (render?.state !== "error") return "";
+  const error = render.error || renderLabels.error;
+  const detail = render.stderr?.trim().split("\n").at(-1)?.trim();
+  return error.startsWith("Plot process exited") && detail ? `${error} ${detail}` : error;
+}
+
+function drawRenderFailure() {
+  const message = renderFailure(state.renders[selected]);
+  const failure = $("#render-failure");
+  if (failure.textContent !== message) failure.textContent = message;
+  failure.hidden = !message;
+}
 
 async function request(path, body) {
   const response = await fetch(path, body === undefined ? {} : {
@@ -46,16 +78,25 @@ async function request(path, body) {
 function field(caption, input) {
   const label = document.createElement("label");
   label.className = "field";
-  label.append(caption, input);
+  if (input.type === "checkbox") {
+    label.classList.add("checkbox");
+    label.append(input, caption);
+  } else {
+    label.append(caption, input);
+  }
+  input.name ||= caption.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/-$/, "");
+  input.autocomplete = "off";
   return label;
 }
 
 function report(message) {
-  $("#status").textContent = message;
+  const status = $("#status");
+  status.textContent = message;
+  status.title = message;
 }
 
 async function commit(path, body, remember = true) {
-  if (busy || cornerDrag) return false;
+  if (!state || busy || panelGesture) return false;
   busy = true;
   try {
     const before = state.project;
@@ -65,27 +106,30 @@ async function commit(path, body, remember = true) {
       future = [];
     }
     draw();
+    scheduleRefresh();
     return true;
   } catch (error) { report(error.message); return false; }
   finally { busy = false; }
 }
 
 function change(mutate) {
+  if (pendingChange) return pendingChange.then(() => change(mutate));
+  if (automaticRefresh) return automaticRefresh.then(() => change(mutate));
   const project = structuredClone(state.project);
   try { mutate(project); } catch (error) { report(error.message); return Promise.resolve(false); }
-  return commit("/api/project", project);
+  pendingChange = commit("/api/project", project).finally(() => { pendingChange = null; });
+  return pendingChange;
 }
 
-async function layout(kind, fields = {}, autoRender = false) {
-  const saved = await commit("/api/layout", { kind, panel: selected, ...fields, auto_render: autoRender });
-  if (saved && autoRender && state.panels_to_refresh?.length) {
-    await refresh(state.panels_to_refresh);
-  }
-  return saved;
+async function layout(kind, fields = {}) {
+  const body = { kind, panel: selected, ...fields };
+  if (automaticRefresh) await automaticRefresh;
+  return commit("/api/layout", body);
 }
 
 async function history(from, to) {
-  if (!from.length || busy) return;
+  if (automaticRefresh) await automaticRefresh;
+  if (!from.length || busy || panelGesture) return;
   const previous = state.project;
   const next = from.pop();
   to.push(previous);
@@ -97,20 +141,90 @@ async function history(from, to) {
 }
 
 function selectPanel(id) {
+  if (!state) return;
+  selectedGroup = null;
+  multiSelection.clear();
+  selectedCheck = null;
+  if (id !== selected) editorOpen = false;
   selected = id;
-  draw();
+  draw(false);
+}
+
+function selectGroup(group) {
+  selected = null;
+  editorOpen = false;
+  showChecks = false;
+  selectedCheck = null;
+  selectedGroup = group.id;
+  multiSelection.clear();
+  draw(false);
+}
+
+function selectedPanelIds() {
+  if (selected) return new Set([selected]);
+  const group = state.project.groups?.find(item => item.id === selectedGroup);
+  return new Set(group?.panels || multiSelection);
+}
+
+function selectPanels(ids) {
+  showChecks = false;
+  if (ids.size < 2) {
+    selectPanel(ids.values().next().value ?? null);
+    return;
+  }
+  selected = null;
+  selectedGroup = null;
+  selectedCheck = null;
+  editorOpen = false;
+  multiSelection.clear();
+  for (const id of ids) multiSelection.add(id);
+  draw(false);
+}
+
+function toggleSelection(ids) {
+  const selection = selectedPanelIds();
+  const remove = ids.every(id => selection.has(id));
+  for (const id of ids) {
+    if (remove) selection.delete(id);
+    else selection.add(id);
+  }
+  selectPanels(selection);
+}
+
+function canGroupSelection() {
+  return multiSelection.size > 1 &&
+    !state.project.groups?.some(group => group.panels.some(id => multiSelection.has(id)));
+}
+
+function groupBounds(rects) {
+  const x = Math.min(...rects.map(rect => rect.x));
+  const y = Math.min(...rects.map(rect => rect.y));
+  return {x, y, w: Math.max(...rects.map(rect => rect.x + rect.w)) - x,
+          h: Math.max(...rects.map(rect => rect.y + rect.h)) - y};
 }
 
 function button(caption, action) {
   const control = document.createElement("button");
+  control.type = "button";
   control.textContent = caption;
   control.onclick = action;
   return control;
 }
 
-function numeric(caption, value, onChange, minimum = 0) {
+function icon(name) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  node.setAttribute("class", "icon");
+  node.setAttribute("aria-hidden", "true");
+  const glyph = document.createElementNS(node.namespaceURI, "use");
+  glyph.setAttribute("href", `./icons.svg#${name}`);
+  node.append(glyph);
+  return node;
+}
+
+function numeric(caption, value, onChange, minimum = 0, maximum) {
   const input = document.createElement("input");
-  Object.assign(input, { type: "number", min: minimum, step: "any", value });
+  Object.assign(input, { type: "number", min: minimum, step: "any", value: value ?? "" });
+  if (maximum !== undefined) input.max = maximum;
   input.onchange = () => {
     if (input.validity.valid && Number.isFinite(input.valueAsNumber)) onChange(input.valueAsNumber);
   };
@@ -123,238 +237,353 @@ function rectangle(node, {x, y, w, h}) {
   });
 }
 
-function dropZone(parent, edge, target, frame = false) {
-  const zone = document.createElement("div");
-  zone.className = `drop-zone ${edge}${frame ? " frame-zone" : ""}`;
-  zone.ondragover = event => {
-    if (!dragged || dragged === target || (dragged === "new" && edge === "center")) return;
-    event.preventDefault();
-    zone.classList.add("over");
-    event.dataTransfer.dropEffect = "move";
-  };
-  zone.ondragleave = () => zone.classList.remove("over");
-  zone.ondrop = event => {
-    event.preventDefault();
-    event.stopPropagation();
-    const panel = dragged;
-    endDrag();
-    if (panel === "new") {
-      if (edge !== "center") addPanel(target, edge, true);
-    } else if (panel && panel !== target) layout("move", { panel, target, edge }, true);
-  };
-  parent.append(zone);
-}
-
 function endDrag() {
+  if (draggedType) $("#panel-types").hidePopover();
   dragged = null;
-  $("#frame").classList.remove("dragging");
-  document.querySelectorAll(".drop-zone.over,.tile.drag-source")
-    .forEach(node => node.classList.remove("over", "drag-source"));
+  draggedType = null;
+  $("#frame").classList.remove("placing-panel");
 }
 
-function dragPanel(event, id) {
-  if (busy || cornerDrag) {
+function startListDrag(event, id, type = null) {
+  if (busy || panelGesture) {
     event.preventDefault();
     return;
   }
   dragged = id;
-  event.dataTransfer.setData("text/plain", id);
-  event.dataTransfer.effectAllowed = "move";
-  requestAnimationFrame(() => {
-    if (!dragged) return;
-    $("#frame").classList.add("dragging");
-    panels.get(id)?.classList.add("drag-source");
+  draggedType = type;
+  event.dataTransfer.setData("text/plain", type || id);
+  event.dataTransfer.effectAllowed = type ? "copy" : "move";
+  if (type) $("#frame").classList.add("placing-panel");
+}
+
+const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
+const cleanMm = value => Number(value.toFixed(8));
+
+function snapped(value, low, high) {
+  const step = state.geometry.grid_step;
+  const gridLine = clamp(Math.round(value / step) * step,
+    Math.ceil(low / step) * step, Math.floor(high / step) * step);
+  const bounded = clamp(value, low, high);
+  if (bounded === low || bounded === high || gridLine < low || gridLine > high) return bounded;
+  return gridLine;
+}
+
+function panelPlacement(rect, locks, edges, dx, dy, minimums = {}) {
+  const result = { ...rect };
+  const {width_mm, height_mm, minimum_mm} = state.project.size;
+  for (const [axis, dim, delta, span, leading] of [
+    ["x", "w", dx, width_mm, "left"], ["y", "h", dy, height_mm, "top"],
+  ]) {
+    if (!delta) continue;
+    if (!edges) {
+      result[axis] = cleanMm(snapped(rect[axis] + delta, 0, span - rect[dim]));
+    } else if (!(dim in locks)) {
+      const isLeading = edges.includes(leading);
+      const far = rect[axis] + rect[dim];
+      const minimum = minimums[dim] ?? minimum_mm;
+      if (isLeading) {
+        result[axis] = cleanMm(snapped(rect[axis] + delta, 0, far - minimum));
+        result[dim] = cleanMm(far - result[axis]);
+      } else {
+        result[dim] = cleanMm(snapped(far + delta, rect[axis] + minimum, span) - rect[axis]);
+      }
+    }
+  }
+  return result;
+}
+
+function selectionLayout(ids) {
+  const entries = [...ids].map(id => [id, state.geometry.rects[id]]);
+  const rects = entries.map(([, rect]) => rect);
+  const bounds = rects.length > 1 ? groupBounds(rects) : rects[0];
+  const locks = {};
+  const minimums = {};
+  const minimum = state.project.size.minimum_mm;
+  for (const dim of ["w", "h"]) {
+    if (state.project.panels.some(panel => ids.has(panel.id) && dim in panel.locks)) locks[dim] = true;
+    const smallest = Math.min(...rects.map(rect => rect[dim]));
+    minimums[dim] = Math.min(bounds[dim], minimum * (bounds[dim] / smallest));
+  }
+  return { entries, bounds, locks, minimums };
+}
+
+function transformRect(rect, from, to) {
+  const result = { ...rect };
+  for (const [axis, dim] of [["x", "w"], ["y", "h"]]) {
+    if (from[axis] === to[axis] && from[dim] === to[dim]) continue;
+    const scale = to[dim] / from[dim];
+    result[axis] = cleanMm(to[axis] + (rect[axis] - from[axis]) * scale);
+    if (from[dim] !== to[dim]) result[dim] = cleanMm(rect[dim] * scale);
+  }
+  return result;
+}
+
+function storeSelectionBounds(project, { entries, bounds }, rect) {
+  for (const [id, original] of entries) project.layout.rects[id] = transformRect(original, bounds, rect);
+}
+
+function applySelectionBounds(target, rect) {
+  const { entries, bounds } = target;
+  if (!Object.keys(rect).some(key => rect[key] !== bounds[key])) return false;
+  if (entries.length === 1) return layout("place", { panel: entries[0][0], rect });
+  return change(project => storeSelectionBounds(project, target, rect));
+}
+
+function trackPanelGesture(event, move, finish) {
+  const handle = event.currentTarget;
+  const pointer = event.pointerId;
+  const gesture = {};
+  panelGesture = gesture;
+  handle.setPointerCapture(pointer);
+
+  const update = point => { if (point.pointerId === pointer) move(point); };
+  const end = point => {
+    if (point.pointerId !== pointer || panelGesture !== gesture) return;
+    panelGesture = null;
+    handle.removeEventListener("pointermove", update);
+    window.removeEventListener("keydown", cancel);
+    for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) handle.removeEventListener(type, end);
+    finish(point.type === "pointerup" ? point : null);
+  };
+  const cancel = key => {
+    if (key.key === "Escape" && handle.hasPointerCapture(pointer)) {
+      key.preventDefault();
+      handle.releasePointerCapture(pointer);
+      end({ pointerId: pointer, type: "pointercancel" });
+    }
+  };
+  handle.addEventListener("pointermove", update);
+  window.addEventListener("keydown", cancel);
+  for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) handle.addEventListener(type, end);
+}
+
+function resizeKeys(event, id, edges = null) {
+  const direction = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[event.key];
+  if (!direction || event.altKey || event.metaKey || event.ctrlKey || (busy && !automaticRefresh) || panelGesture) return;
+  event.preventDefault();
+  const step = state.geometry.grid_step * (event.shiftKey ? 5 : 1);
+  const selection = selectedPanelIds();
+  const target = selectionLayout(id === null || !edges && selection.has(id) ? selection : new Set([id]));
+  const rect = panelPlacement(target.bounds, target.locks, edges, direction[0] * step, direction[1] * step,
+    target.minimums);
+  applySelectionBounds(target, rect);
+}
+
+function startPanelGesture(event, id, edges = null) {
+  if (event.button !== 0 || !event.isPrimary || (busy && !automaticRefresh) || panelGesture || draggedType) return;
+  event.stopPropagation();
+  const tile = panels.get(id);
+  if (event.shiftKey && !edges) {
+    event.preventDefault();
+    tile.focus({ preventScroll: true });
+    toggleSelection([id]);
+    return;
+  }
+  const selection = selectedPanelIds();
+  if (id !== null && !selection.has(id)) {
+    showChecks = false;
+    selectPanel(id);
+  } else if (showChecks) {
+    showChecks = false;
+    drawChecks();
+  }
+  const start = [event.clientX, event.clientY];
+  const scale = zoom;
+  const canvas = $("#frame");
+  const initialFrame = canvas.getBoundingClientRect();
+  const target = selectionLayout(id === null || !edges && selection.has(id) ? selection : new Set([id]));
+  const { entries, bounds, locks, minimums } = target;
+  const multiple = entries.length > 1;
+  let moved = false;
+  function placement(point) {
+    const frame = canvas.getBoundingClientRect();
+    const dx = point.clientX - start[0] - (frame.left - initialFrame.left);
+    const dy = point.clientY - start[1] - (frame.top - initialFrame.top);
+    if (!moved && Math.hypot(dx, dy) < 4) return bounds;
+    moved = true;
+    canvas.classList.add("editing-panel");
+    tile?.classList.toggle("moving-panel", !multiple);
+    return panelPlacement(bounds, locks, edges, dx / scale, dy / scale, minimums);
+  }
+  const move = point => {
+    const rect = placement(point);
+    for (const [member, original] of entries) {
+      rectangle(panels.get(member), multiple ? transformRect(original, bounds, rect) : rect);
+    }
+    if (multiple) rectangle($("#group-outline"), rect);
+    rectangle($("#panel-handles"), rect);
+  };
+  const finish = async point => {
+    const rect = point ? placement(point) : bounds;
+    canvas.classList.remove("editing-panel");
+    tile?.classList.remove("moving-panel");
+    if (!await applySelectionBounds(target, rect)) drawCanvas();
+  };
+  trackPanelGesture(event, move, finish);
+}
+
+function startMarquee(event) {
+  if (!state || !event.isPrimary || event.button !== 0 || event.pointerType === "touch" ||
+      (event.target !== frame && event.target !== viewport) || panelGesture || dragged || draggedType) return;
+  event.preventDefault();
+  viewport.focus({ preventScroll: true });
+  const marquee = $("#selection-marquee");
+  const { width_mm, height_mm } = state.project.size;
+  const artboardPoint = point => {
+    const board = frame.getBoundingClientRect();
+    return {
+      x: clamp((point.clientX - board.left) / zoom, 0, width_mm),
+      y: clamp((point.clientY - board.top) / zoom, 0, height_mm),
+    };
+  };
+  const origin = artboardPoint(event);
+  const additive = event.shiftKey;
+  const previous = selectedPanelIds();
+  let moved = false;
+  let hits = new Set();
+
+  function update(point) {
+    if (!moved && Math.hypot(point.clientX - event.clientX, point.clientY - event.clientY) < 4) return;
+    moved = true;
+    const corner = artboardPoint(point);
+    const x = Math.min(origin.x, corner.x);
+    const y = Math.min(origin.y, corner.y);
+    const right = Math.max(origin.x, corner.x);
+    const bottom = Math.max(origin.y, corner.y);
+    hits = additive ? new Set(previous) : new Set();
+    if (right > x && bottom > y) {
+      for (const [id, rect] of Object.entries(state.geometry.rects)) {
+        if (rect.x < right && rect.x + rect.w > x && rect.y < bottom && rect.y + rect.h > y) hits.add(id);
+      }
+    }
+    frame.classList.add("selecting-panels");
+    rectangle(marquee, { x, y, w: right - x, h: bottom - y });
+    marquee.hidden = false;
+    drawCanvasSelection(hits);
+  }
+
+  trackPanelGesture(event, update, point => {
+    if (point) update(point);
+    frame.classList.remove("selecting-panels");
+    marquee.hidden = true;
+    if (point && (moved || !additive)) selectPanels(hits);
+    else drawCanvas();
   });
 }
 
-function resizeHandle(key, handle) {
-  const node = document.createElement("div");
-  node.className = `handle ${handle.axis}`;
-  node.tabIndex = 0;
-  node.setAttribute("role", "separator");
-  node.setAttribute("aria-label", "Resize adjoining panels");
-  node.setAttribute("aria-orientation", handle.axis === "x" ? "vertical" : "horizontal");
-  const vertical = handle.axis === "x";
-  const rect = vertical
-    ? {x: handle.at, y: handle.start, w: 0, h: handle.length}
-    : {x: handle.start, y: handle.at, w: handle.length, h: 0};
-  rectangle(node, rect);
-  const pointer = event => vertical ? event.clientX : event.clientY;
-  node.onpointerdown = event => {
-    if (event.button !== 0 || busy || cornerDrag) return;
-    const start = pointer(event);
-    const group = [...$("#frame").querySelectorAll(".handle")].filter(
-      item => item.dataset.axis === handle.axis && Math.abs(Number(item.dataset.at) - handle.at) < 1e-7
-    );
-    node.setPointerCapture(event.pointerId);
-    node.classList.add("resizing");
-    node.onpointermove = move => {
-      const delta = pointer(move) - start;
-      for (const item of group) {
-        item.style.transform = vertical ? `translateX(${delta}px)` : `translateY(${delta}px)`;
-      }
-    };
-    const finish = (end, commitResize) => {
-      node.classList.remove("resizing");
-      node.onpointermove = null;
-      for (const item of group) item.style.transform = "";
-      const delta = (pointer(end) - start) / zoom;
-      if (commitResize && Math.abs(delta) > 0.1) {
-        layout("resize", { handle: key, delta, snap: Math.min(20, 5 / zoom) }, true);
-      }
-    };
-    node.onpointerup = end => finish(end, true);
-    node.onpointercancel = end => finish(end, false);
-  };
-  node.onkeydown = event => {
-    const directions = vertical ? ["ArrowLeft", "ArrowRight"] : ["ArrowUp", "ArrowDown"];
-    if (!directions.includes(event.key)) return;
-    event.preventDefault();
-    layout("resize", { handle: key, delta: (event.shiftKey ? 5 : 1) * (event.key === directions[0] ? -1 : 1) });
-  };
-  Object.assign(node.dataset, { axis: handle.axis, at: handle.at });
-  return node;
-}
-
-function positionPanels(rects) {
-  for (const [id, rect] of Object.entries(rects)) {
-    const tile = panels.get(id);
-    if (tile) rectangle(tile, rect);
-  }
-}
-
-function cornerHandle(tile, panelId, corner, edges) {
-  const node = document.createElement("button");
-  node.type = "button";
+function cornerHandle(id, corner, edges) {
+  const node = button("", event => event.stopPropagation());
   node.className = `corner-handle ${corner}`;
-  const caption = `Resize from ${corner.replace("-", " ")}`;
-  node.setAttribute("aria-label", caption);
-
-  const mobility = () => {
-    const shared = state.geometry.panel_edges?.[panelId] || [];
-    return edges.map(edge => shared.includes(edge));
-  };
-  const operation = (dx, dy, snap = 0) => ({ panel: panelId, corner, dx, dy, snap });
-
-  node.onclick = event => event.stopPropagation();
-  node.ondragstart = event => event.preventDefault();
-  node.onkeydown = event => {
-    const step = event.shiftKey ? 5 : 1;
-    const [dx, dy] = {
-      ArrowLeft: [-step, 0], ArrowRight: [step, 0],
-      ArrowUp: [0, -step], ArrowDown: [0, step],
-    }[event.key] || [0, 0];
-    const [x, y] = mobility();
-    if (!(x && dx || y && dy)) return;
-    event.preventDefault();
-    layout("resize-corner", operation(dx, dy));
-  };
-
-  node.onpointerdown = event => {
-    if (event.button !== 0 || event.isPrimary === false || busy || cornerDrag) return;
-    const [x, y] = mobility();
-    if (!x && !y) return;
-    event.stopPropagation();
-    const frame = $("#frame");
-    const start = [event.clientX, event.clientY];
-    const scale = zoom;
-    const snap = Math.min(20, 5 / scale);
-    const movement = point => operation(
-      x ? (point.clientX - start[0]) / scale : 0,
-      y ? (point.clientY - start[1]) / scale : 0, snap);
-    const pointer = event.pointerId;
-    const frameClass = "resizing-corner";
-    let pending = null;
-    let inFlight = false;
-    let raf = 0;
-    const gesture = {};
-    cornerDrag = gesture;
-    frame.classList.add(frameClass);
-    tile.draggable = false;
-    node.setPointerCapture(pointer);
-
-    const schedule = () => {
-      if (!inFlight && !raf && pending) raf = requestAnimationFrame(preview);
-    };
-    async function preview() {
-      raf = 0;
-      const next = pending;
-      pending = null;
-      inFlight = true;
-      try {
-        const result = await request("/api/preview-corner", next);
-        if (cornerDrag === gesture) positionPanels(result.rects);
-      } catch {
-        // The final layout request reports errors and restores the committed geometry.
-      } finally {
-        inFlight = false;
-        if (cornerDrag === gesture) schedule();
-      }
-    }
-
-    node.onpointermove = move => {
-      if (move.pointerId !== pointer) return;
-      pending = movement(move);
-      schedule();
-    };
-    const finish = async (end, save) => {
-      if (end.pointerId !== pointer || cornerDrag !== gesture) return;
-      node.onpointermove = null;
-      node.onpointerup = null;
-      node.onpointercancel = null;
-      node.onlostpointercapture = null;
-      cancelAnimationFrame(raf);
-      pending = null;
-      cornerDrag = null;
-      tile.draggable = true;
-      const next = movement(end);
-      frame.classList.remove(frameClass);
-      if (save && (Math.abs(next.dx) > .1 || Math.abs(next.dy) > .1)) {
-        if (await layout("resize-corner", next, true)) return;
-      }
-      positionPanels(state.geometry.rects);
-    };
-    node.onpointerup = end => finish(end, true);
-    node.onpointercancel = end => finish(end, false);
-    node.onlostpointercapture = end => finish(end, false);
-  };
+  node.setAttribute("aria-label", `Resize ${id === null ? "selection " : ""}from ${corner.replace("-", " ")}`);
+  node.onkeydown = event => resizeKeys(event, id, edges);
+  node.onpointerdown = event => startPanelGesture(event, id, edges);
   return node;
 }
 
-function calibratedScale() {
-  const value = Number(state.pixels_per_mm);
-  return value > 0 ? value : CSS_PX_PER_MM;
+function drawHandles(selection) {
+  const layer = $("#panel-handles");
+  const id = selection.size === 1 ? selection.values().next().value : null;
+  const outline = $("#group-outline");
+  outline.hidden = selection.size < 2;
+  layer.hidden = !selection.size;
+  if (!selection.size) return;
+  const { bounds, locks } = selectionLayout(selection);
+  if (layer.dataset.panel !== (id ?? "")) {
+    layer.dataset.panel = id ?? "";
+    layer.replaceChildren(...Object.entries(corners).map(([corner, edges]) =>
+      cornerHandle(id, corner, edges)));
+  }
+  const x = !("w" in locks);
+  const y = !("h" in locks);
+  for (const handle of layer.children) {
+    handle.disabled = !x && !y;
+    handle.dataset.movement = x && y ? "both" : x ? "x" : y ? "y" : "fixed";
+  }
+  rectangle(layer, bounds);
+  if (!outline.hidden) rectangle(outline, bounds);
 }
 
 function fitScale() {
   const viewport = $(".viewport");
   const {width_mm, height_mm} = state.project.size;
-  return Math.max(.1, Math.min((viewport.clientWidth - 56) / width_mm,
-                              (viewport.clientHeight - 56) / height_mm));
+  const padding = parseFloat(getComputedStyle(viewport).paddingInlineStart) * 2;
+  const horizontal = (viewport.clientWidth - padding) / width_mm;
+  const vertical = (viewport.clientHeight - padding) / height_mm;
+  return Math.max(.1, viewMode === "width" ? horizontal : Math.min(horizontal, vertical));
+}
+
+function drawCanvasSelection(selection) {
+  for (const [id, tile] of panels) {
+    tile.classList.toggle("selected", selection.has(id));
+    tile.setAttribute("aria-pressed", String(selection.has(id)));
+  }
+}
+
+let hitSample;
+
+function panelHasInk(tile, x, y) {
+  const label = tile.querySelector(".panel-label");
+  const bounds = label.getBoundingClientRect();
+  if (label.textContent && x >= bounds.left && x < bounds.right && y >= bounds.top && y < bounds.bottom) return true;
+
+  const preview = tile.querySelector(".plot-preview");
+  if (preview.hidden || !preview.complete || !preview.naturalWidth) return true;
+  const {left, top, width, height} = preview.getBoundingClientRect();
+  const sourceWidth = preview.naturalWidth;
+  const sourceHeight = preview.naturalHeight;
+  const scale = Math.min(width / sourceWidth, height / sourceHeight);
+  if (!scale) return false;
+  const sx = Math.floor((x - left - (width - sourceWidth * scale) / 2) / scale);
+  const sy = Math.floor((y - top - (height - sourceHeight * scale) / 2) / scale);
+  if (sx < 0 || sy < 0 || sx >= sourceWidth || sy >= sourceHeight) return false;
+
+  if (!hitSample) {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 1;
+    hitSample = canvas.getContext("2d", {willReadFrequently: true});
+    if (!hitSample) return true;
+  }
+  hitSample.clearRect(0, 0, 1, 1);
+  // Draw at the density-corrected size. A source crop would use the encoded
+  // pixels of the selected srcset candidate in some browsers.
+  hitSample.drawImage(preview, -sx, -sy, sourceWidth, sourceHeight);
+  return hitSample.getImageData(0, 0, 1, 1).data[3] > 12;
+}
+
+function panelAtPointer(event, fallback) {
+  const {clientX, clientY} = event;
+  const layers = document.elementsFromPoint(clientX, clientY).filter(node => node.matches(".tile[data-panel]"));
+  if (layers.length < 2) return fallback;
+  return layers.find(tile => panelHasInk(tile, clientX, clientY))?.dataset.panel ?? fallback;
 }
 
 function drawCanvas() {
-  if (cornerDrag) return;
+  if (panelGesture) return;
   const frame = $("#frame");
   const { project, geometry } = state;
-  if (viewMode === "fit") zoom = fitScale();
-  else if (viewMode === "actual") zoom = calibratedScale();
+  const selection = selectedPanelIds();
+  if (viewMode === "fit" || viewMode === "width") zoom = fitScale();
+  else if (viewMode === "actual") zoom = CSS_PX_PER_MM;
   $("#fit-view").setAttribute("aria-pressed", String(viewMode === "fit"));
+  $("#fit-width").setAttribute("aria-pressed", String(viewMode === "width"));
   $("#actual-size").setAttribute("aria-pressed", String(viewMode === "actual"));
   const { width_mm, height_mm } = project.size;
+  frame.style.setProperty("--grid-step", `${geometry.grid_step * zoom}px`);
+  frame.style.setProperty("--active-panel-order", project.panels.length + 2);
   frame.style.width = `${width_mm * zoom}px`;
   frame.style.height = `${height_mm * zoom}px`;
-  for (const node of frame.querySelectorAll(":scope > :not(.tile)")) node.remove();
+  frame.querySelector(".height-guide")?.remove();
   for (const [id, node] of panels) {
     if (!(id in geometry.rects)) { node.remove(); panels.delete(id); }
   }
-  for (const panel of project.panels) {
+  for (const [index, panel] of project.panels.entries()) {
     let tile = panels.get(panel.id);
     if (!tile) {
       tile = document.createElement("div");
       tile.className = "tile";
       tile.tabIndex = 0;
-      tile.draggable = true;
+      tile.setAttribute("role", "button");
+      tile.dataset.panel = panel.id;
       const caption = document.createElement("span");
       caption.className = "tile-caption";
       const preview = document.createElement("img");
@@ -368,33 +597,35 @@ function drawCanvas() {
       const label = document.createElement("span");
       label.className = "panel-label";
       tile.append(caption, preview, highlights, label, badge);
-      for (const edge of [...edgeNames, "center"]) dropZone(tile, edge, panel.id);
-      for (const [corner, edges] of Object.entries(corners)) {
-        tile.append(cornerHandle(tile, panel.id, corner, edges));
-      }
-      tile.onclick = () => selectPanel(panel.id);
-      tile.onkeydown = event => {
-        if (event.target === tile && (event.key === "Enter" || event.key === " ")) {
-          event.preventDefault();
-          selectPanel(panel.id);
-        }
+      tile.ondblclick = event => {
+        const id = panelAtPointer(event, panel.id);
+        if (!event.shiftKey && isScript(state.project.panels.find(item => item.id === id))) openEditor(id);
       };
-      tile.ondragstart = event => dragPanel(event, panel.id);
-      tile.ondragend = endDrag;
+      tile.onpointerdown = event => {
+        if (event.button !== 0 || !event.isPrimary) return;
+        const id = panelAtPointer(event, panel.id);
+        if (id !== panel.id) {
+          event.preventDefault();
+          panels.get(id).focus({preventScroll: true});
+        }
+        startPanelGesture(event, id);
+      };
+      tile.onkeydown = event => {
+        if (event.target !== tile) return;
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          if (event.shiftKey) toggleSelection([panel.id]);
+          else {
+            showChecks = false;
+            selectPanel(panel.id);
+          }
+        } else resizeKeys(event, panel.id);
+      };
       panels.set(panel.id, tile);
       frame.append(tile);
     }
-    tile.classList.toggle("selected", panel.id === selected);
-    const shared = geometry.panel_edges?.[panel.id] || [];
-    for (const [corner, [horizontal, vertical]] of Object.entries(corners)) {
-      const handle = tile.querySelector(`.corner-handle.${corner}`);
-      const x = shared.includes(horizontal);
-      const y = shared.includes(vertical);
-      handle.disabled = !x && !y;
-      handle.dataset.movement = x && y ? "both" : x ? "x" : y ? "y" : "fixed";
-      handle.title = handle.disabled ? "This corner is fixed by the figure margins" :
-        `${handle.getAttribute("aria-label")}${x && y ? "" : x ? " horizontally" : " vertically"}`;
-    }
+    tile.setAttribute("aria-label", panel.name);
+    tile.style.setProperty("--panel-order", index + 1);
     tile.querySelector(".tile-caption").textContent = panel.name;
     const render = state.renders[panel.id];
     const image = tile.querySelector(".plot-preview");
@@ -402,82 +633,156 @@ function drawCanvas() {
     if (src && image.getAttribute("src") !== src) image.src = src;
     image.hidden = !src;
     const rect = geometry.rects[panel.id];
+    image.width = Math.round(rect.w * zoom);
+    image.height = Math.round(rect.h * zoom);
     const content = render?.box || rect;
     const contentTop = (content.y - rect.y) / rect.h * 100;
+    const page = render?.metadata?.page_pt;
+    const scale = page ? Math.min(content.w / page[0], content.h / page[1]) : 0;
+    const previewWidth = page ? Math.max(1, Math.round(page[0] * scale * zoom)) : 0;
+    if (src && page) {
+      image.sizes = `${previewWidth}px`;
+      // Match the server's raster budget even for unusually large panels.
+      const pixelDpi = Math.max(1, Math.floor(72 * Math.sqrt(12000000 / (page[0] * page[1]))));
+      const widths = new Set();
+      image.srcset = [130, 260, 520, 1040].map(dpi => {
+        const width = Math.ceil(page[0] * Math.min(dpi, pixelDpi) / 72);
+        if (widths.has(width)) return "";
+        widths.add(width);
+        return `${src}${dpi === 130 ? "" : `?dpi=${dpi}`} ${width}w`;
+      }).filter(Boolean).join(", ");
+    } else image.removeAttribute("srcset");
     image.style.top = `${contentTop}%`;
     image.style.height = `${100 - contentTop}%`;
     const label = tile.querySelector(".panel-label");
     label.textContent = panel.label;
-    const style = render.style;
-    Object.assign(label.style, {
-      top: `${style.label_offset_y_mm * zoom}px`, left: `${style.label_offset_x_mm * zoom}px`,
-      fontFamily: style.font_family, fontWeight: style.panel_label_weight,
-      fontSize: `${style.panel_label_pt * 25.4 / 72 * zoom}px`,
-    });
+    if (render.label_metadata) {
+      const style = render.style;
+      const {bbox: [x, y], size} = render.label_metadata;
+      const pxPerPoint = 25.4 / 72 * zoom;
+      Object.assign(label.style, {
+        left: `${x * pxPerPoint}px`, top: `${y * pxPerPoint}px`,
+        fontFamily: style.font_family, fontWeight: style.panel_label_weight,
+        fontSize: `${size * pxPerPoint}px`,
+      });
+    }
     tile.querySelector(".tile-caption").hidden = !!src;
     const badge = tile.querySelector(".render-badge");
-    badge.textContent = render?.state || "";
+    badge.textContent = renderLabels[render?.state] || "";
+    badge.hidden = !badge.textContent;
     badge.dataset.state = render?.state || "";
-    const highlights = state.checks.filter(check => check.panel === panel.id && check.bbox)
-      .map(check => {
+    const description = renderFailure(render);
+    if (description) {
+      tile.title = description;
+      tile.setAttribute("aria-description", description);
+    } else {
+      tile.removeAttribute("title");
+      tile.removeAttribute("aria-description");
+    }
+    const highlights = state.checks.filter(check => check.panel === panel.id &&
+      (check.bbox || (check.boxes && check === selectedCheck)))
+      .flatMap(check => (check.boxes || [check.bbox]).map(box => {
         const node = document.createElement("span");
-        const [x0, y0, x1, y1] = check.bbox;
+        const [x0, y0, x1, y1] = box;
         const [w, h] = check.page_pt;
-        Object.assign(node.style, { left: `${x0 / w * 100}%`, top: `${(check.label ? 0 : contentTop) + y0 / h * (check.label ? 100 : 100 - contentTop)}%`,
-          width: `${(x1 - x0) / w * 100}%`, height: `${(y1 - y0) / h * (check.label ? 100 : 100 - contentTop)}%` });
+        const factor = check.label ? rect.w / w : scale;
+        const dx = check.label ? 0 : (content.w - w*factor) / 2;
+        const dy = check.label ? 0 : content.y - rect.y + (content.h - h*factor) / 2;
+        Object.assign(node.style, {left: `${(dx + x0*factor) / rect.w * 100}%`,
+          top: `${(dy + y0*factor) / rect.h * 100}%`,
+          width: `${(x1-x0)*factor / rect.w * 100}%`, height: `${(y1-y0)*factor / rect.h * 100}%`});
         return node;
-      });
+      }));
     tile.querySelector(".highlights").replaceChildren(...highlights);
     rectangle(tile, geometry.rects[panel.id]);
   }
-  for (const [key, handle] of Object.entries(geometry.handles)) frame.append(resizeHandle(key, handle));
-  for (const edge of edgeNames) dropZone(frame, edge, null, true);
+  drawCanvasSelection(selection);
+  drawHandles(selection);
   const journal = journals.find(item => item.id === project.size.preset_id);
   if (journal?.max_height_mm) {
     const guide = document.createElement("div");
     guide.className = "height-guide";
     guide.classList.toggle("outside", journal.max_height_mm > height_mm);
     guide.style.top = `${Math.min(journal.max_height_mm, height_mm) * zoom}px`;
-    guide.textContent = `${journal.name} guide · ${journal.max_height_mm} mm`;
+    guide.textContent = `${journal.name} limit: ${journal.max_height_mm} mm`;
     frame.append(guide);
   }
-  if (!project.panels.length) {
-    const empty = document.createElement("p");
-    empty.className = "empty";
-    empty.textContent = "Add a panel to start your figure.";
-    frame.append(empty);
-  }
+  $("#empty-canvas").hidden = Boolean(project.panels.length);
 }
 
 function drawPanels() {
   const list = $("#panel-list");
-  list.replaceChildren(...state.project.panels.map(panel => {
+  const focused = list.contains(document.activeElement) && document.activeElement;
+  const selection = selectedPanelIds();
+  $("#figure-settings").setAttribute("aria-pressed", String(!selection.size));
+  $("#group-panels").hidden = !canGroupSelection();
+  const rows = new Map(state.project.panels.map(panel => {
     const render = state.renders[panel.id];
-    const row = button(panel.name, () => selectPanel(panel.id));
+    const row = button("", event => {
+      showChecks = false;
+      if (event.shiftKey) toggleSelection([panel.id]);
+      else selectPanel(panel.id);
+    });
     row.className = "panel-row";
-    const meta = document.createElement("small");
-    meta.textContent = [typeNames[panel.type], panel.label, render?.state].filter(Boolean).join(" · ");
-    if (panel.type === "vector") meta.textContent += " · original style";
-    if (Object.keys(panel.overrides).length) meta.textContent += " · styled locally";
-    row.append(meta);
-    row.classList.toggle("selected", panel.id === selected);
+    row.dataset.panel = panel.id;
+    row.setAttribute("aria-label", panel.name);
+    row.setAttribute("aria-pressed", String(selection.has(panel.id)));
+    row.append(icon(typeIcons[panel.type]));
+    const name = document.createElement("span");
+    name.className = "panel-name";
+    name.textContent = panel.name;
+    if (panel.label) {
+      const label = document.createElement("span");
+      label.className = "panel-letter";
+      label.textContent = panel.label;
+      row.append(label);
+    }
+    row.append(name);
+    if (renderLabels[render?.state]) {
+      const status = document.createElement("span");
+      status.className = "panel-state";
+      status.dataset.state = render.state;
+      status.textContent = render.state === "rendering" ? "…" : "!";
+      status.title = renderFailure(render) || renderLabels[render.state];
+      status.setAttribute("aria-hidden", "true");
+      row.setAttribute("aria-description", status.title);
+      row.append(status);
+    }
     row.draggable = true;
-    row.ondragstart = event => dragPanel(event, panel.id);
+    row.ondragstart = event => startListDrag(event, panel.id);
     row.ondragend = endDrag;
-    row.ondragover = event => { if (dragged && dragged !== panel.id) event.preventDefault(); };
+    row.ondragover = event => { if (!draggedType && dragged && dragged !== panel.id) event.preventDefault(); };
     row.ondrop = event => {
       event.preventDefault();
       const source = dragged;
       endDrag();
-      if (!source || source === "new" || source === panel.id) return;
+      if (!source || source === panel.id) return;
       change(project => {
         const index = project.panels.findIndex(p => p.id === panel.id);
         const [moved] = project.panels.splice(project.panels.findIndex(p => p.id === source), 1);
         project.panels.splice(index, 0, moved);
       });
     };
-    return row;
+    return [panel.id, row];
   }));
+  const sections = new Map();
+  for (const group of state.project.groups || []) {
+    const region = document.createElement("div");
+    region.className = "panel-group";
+    const header = button(group.name, event => {
+      if (event.shiftKey) toggleSelection(group.panels);
+      else selectGroup(group);
+    });
+    header.className = "panel-row group-row";
+    header.dataset.group = group.id;
+    header.setAttribute("aria-pressed", String(group.panels.every(id => selection.has(id))));
+    region.append(header, ...[...rows].filter(([id]) => group.panels.includes(id)).map(([, row]) => row));
+    for (const id of group.panels) sections.set(id, region);
+  }
+  list.replaceChildren(...new Set([...rows].map(([id, row]) => sections.get(id) || row)));
+  for (const key of ["panel", "group"]) {
+    if (focused?.dataset?.[key]) list.querySelector(`[data-${key}="${CSS.escape(focused.dataset[key])}"]`)?.focus({ preventScroll: true });
+  }
 }
 
 function editPanel(panel, mutate) {
@@ -491,11 +796,37 @@ function stringField(caption, value, onChange) {
   return field(caption, input);
 }
 
+function scheduleRefresh() {
+  clearTimeout(refreshTimer);
+  if (!stalePanels().length) return;
+  refreshTimer = setTimeout(() => {
+    if (busy || panelGesture || dragged || draggedType) {
+      scheduleRefresh();
+      return;
+    }
+    const ids = stalePanels();
+    if (!ids.length) return;
+    automaticRefresh = refresh(ids).finally(() => { automaticRefresh = null; });
+  }, 350);
+}
+
+function stalePanels() {
+  return state.project.panels.filter(panel => state.renders[panel.id]?.state === "stale").map(panel => panel.id);
+}
+
+function drawRenderState() {
+  drawEditor(activeScript());
+  drawCanvas();
+  drawPanels();
+  drawChecks();
+  syncRefresh();
+}
+
 async function refresh(ids) {
-  if (busy || cornerDrag) return;
-  const panels = ids || state.project.panels.filter(
-    item => ["stale", "error"].includes(state.renders[item.id]?.state)).map(item => item.id);
+  if (busy || panelGesture) return;
+  const panels = ids || pendingPanels();
   if (!panels.length) return;
+  clearTimeout(refreshTimer);
   for (let size = 0; size !== panels.length;) {
     size = panels.length;
     for (const group of state.project.alignment) {
@@ -506,14 +837,39 @@ async function refresh(ids) {
   }
   const previous = state.renders;
   state.renders = { ...previous };
-  for (const id of panels) state.renders[id] = { ...previous[id], state: "rendering" };
+  for (const id of panels) {
+    if (previous[id]?.state !== "empty") state.renders[id] = { ...previous[id], state: "rendering" };
+  }
+  drawRenderFailure();
   drawCanvas();
   drawPanels();
-  if (!await commit("/api/refresh", { panels }, false)) {
+  syncRefresh();
+  busy = true;
+  try {
+    state = await request("/api/refresh", { panels });
+    drawRenderState();
+    scheduleRefresh();
+  } catch (error) {
     state.renders = previous;
-    drawCanvas();
-    drawPanels();
-  }
+    drawRenderState();
+    report(error.message);
+  } finally { busy = false; }
+}
+
+function pendingPanels() {
+  return state.project.panels.filter(panel =>
+    ["stale", "error"].includes(state.renders[panel.id]?.state) ||
+    (isScript(panel) && drafts.get(panel.id)?.value !== drafts.get(panel.id)?.base)
+  ).map(panel => panel.id);
+}
+
+function syncRefresh() {
+  const rendering = Object.values(state.renders).some(render => render.state === "rendering");
+  $("#refresh-all").disabled = rendering || !pendingPanels().length;
+  $("#refresh-all span").textContent = rendering ? "Rendering…" : "Refresh panels";
+  $("#refresh-selected").hidden = !selected;
+  $("#refresh-selected").disabled = rendering || state.renders[selected]?.state === "empty" &&
+    drafts.get(selected)?.value === drafts.get(selected)?.base;
 }
 
 const styleGroups = {
@@ -526,8 +882,9 @@ const styleGroups = {
     "collapse_empty_labels"],
 };
 const titles = {
-  font_main_pt: "Main font (pt)", font_min_pt: "Minimum font (pt)", line_data_pt: "Data stroke (pt)",
-  line_axis_pt: "Axis stroke (pt)", label_reserve_mm: "Label reservation (mm)",
+  font_main_pt: "Main font size (pt)", font_min_pt: "Minimum font size (pt)", line_data_pt: "Data stroke (pt)",
+  line_axis_pt: "Axis stroke (pt)", label_reserve_mm: "Space for labels (mm)",
+  colors: "Group colours",
   label_offset_x_mm: "Label left offset (mm)", label_offset_y_mm: "Label top offset (mm)",
 };
 
@@ -536,12 +893,24 @@ function titleFor(key) {
   return label[0].toUpperCase() + label.slice(1);
 }
 
-function section(title, children, open = false) {
+function section(title, children, open = false, key = title) {
   const group = document.createElement("details");
   group.open = open;
+  group.dataset.section = key;
   const summary = document.createElement("summary");
   summary.textContent = title;
+  if (inspectorIcons[title]) summary.prepend(icon(inspectorIcons[title]));
   group.append(summary, ...children);
+  return group;
+}
+
+function inspectorGroup(title, children) {
+  const group = document.createElement("section");
+  group.className = "inspector-group";
+  const heading = document.createElement("h3");
+  heading.textContent = title;
+  if (inspectorIcons[title]) heading.prepend(icon(inspectorIcons[title]));
+  group.append(heading, ...children);
   return group;
 }
 
@@ -564,13 +933,14 @@ function styleField(key, value, update) {
   const fallback = state.style_tokens[key];
   const caption = titleFor(key);
   const options = state.style_options[key];
-  if (options) return selectField(caption, options.map(option => [option, option]), value ?? fallback, update);
+  if (options) return selectField(caption, options.map(option =>
+    [option, option === "left-bottom" ? "Left and bottom" : titleFor(option)]), value ?? fallback, update);
   if (typeof fallback === "boolean") return checkField(caption, value ?? fallback, update);
   if (key === "font_family") return stringField(caption, value ?? fallback, update);
   const control = document.createElement("input");
   Object.assign(control, { type: "number", step: "any", value: value ?? fallback ?? "",
     min: key.startsWith("label_offset_") ? -100 : 0 });
-  if (fallback === null) control.placeholder = "Derived from main and minimum";
+  if (fallback === null) control.placeholder = "Automatic";
   control.onchange = () => {
     if (!control.value && fallback === null) update(null);
     else if (control.validity.valid && Number.isFinite(control.valueAsNumber)) update(control.valueAsNumber);
@@ -592,7 +962,7 @@ function allPalettes() {
 }
 
 function paletteChoices() {
-  return Object.entries(allPalettes()).map(([id, item]) => [id, item.name + (item.safe ? " · colourblind-safe" : "")]);
+  return Object.entries(allPalettes()).map(([id, item]) => [id, item.name + (item.safe ? " (colourblind-safe)" : "")]);
 }
 
 function drawPaletteInspector() {
@@ -613,12 +983,10 @@ function drawPaletteInspector() {
     sample.title = color;
     swatches.append(sample);
   }
-  items.push(swatches, button("Duplicate as custom palette", () => {
-    const name = prompt("Palette name", `${palette.name} copy`);
-    if (!name?.trim()) return;
+  items.push(swatches, button("Duplicate palette", () => {
     edit(p => {
       const id = `custom-${crypto.randomUUID()}`;
-      (p.custom ||= {})[id] = { name: name.trim(), safe: false, colors: [...palette.colors] };
+      (p.custom ||= {})[id] = { name: `${palette.name} copy`, safe: false, colors: [...palette.colors] };
       p.active = id;
     });
   }));
@@ -632,6 +1000,8 @@ function drawPaletteInspector() {
       });
       const up = button("↑", () => move(-1));
       const down = button("↓", () => move(1));
+      up.setAttribute("aria-label", `Move colour ${index + 1} up`);
+      down.setAttribute("aria-label", `Move colour ${index + 1} down`);
       up.disabled = index === 0;
       down.disabled = index === palette.colors.length - 1;
       const remove = button("Remove", () => updatePalette(p => p.colors.splice(index, 1)));
@@ -674,16 +1044,17 @@ function drawPaletteInspector() {
     items.push(row);
   }
   items.push(button("Add group", () => {
-    const group = prompt("Semantic group name")?.trim();
-    if (!group || Object.hasOwn(semantic, group)) return;
-    edit(p => { p.colors = { ...p.colors, [group]: "#808080" }; });
+    askValue("Add group", "Group name", "Add", group => {
+      if (Object.hasOwn(semantic, group)) throw new Error("Enter a unique group name.");
+      return edit(p => { p.colors = { ...p.colors, [group]: "#808080" }; });
+    });
   }));
-  return section("Palette and semantic colours", items);
+  return section("Colours", items);
 }
 
 function drawOverrides(panel) {
   const keys = Object.keys(panel.overrides).filter(key => key !== "opt_out");
-  const controls = [checkField("Use script’s own style", panel.overrides.opt_out,
+  const controls = [checkField(isScript(panel) ? "Use the script’s style" : "Allow other fonts", panel.overrides.opt_out,
     value => editPanel(panel, p => {
       if (value) p.overrides.opt_out = true;
       else delete p.overrides.opt_out;
@@ -696,14 +1067,22 @@ function drawOverrides(panel) {
       try { set(JSON.parse(value)); } catch (error) { report(error.message); }
     });
     else input = styleField(key, panel.overrides[key], set);
+    const plotSetting = !["panel_label_pt", "panel_label_weight", "label_reserve_mm",
+      "collapse_empty_labels", "font_min_pt"].includes(key);
+    input.querySelector("input, select").disabled = isScript(panel) && panel.overrides.opt_out && plotSetting;
     const row = document.createElement("div");
     row.className = "inline-fields";
     row.append(input, button("Reset", () => editPanel(panel, p => { delete p.overrides[key]; })));
     controls.push(row);
   }
-  const available = [...Object.keys(state.style_tokens), "palette", "colors"]
-    .filter(key => !key.startsWith("label_offset_") && !Object.hasOwn(panel.overrides, key));
-  controls.push(selectField("Add override", [["", "Choose a style token"], ...available.map(key => [key, titleFor(key)])],
+  const labelStyles = ["font_family", "font_min_pt", "font_main_pt", "panel_label_pt",
+    "panel_label_weight", "label_reserve_mm", "collapse_empty_labels"];
+  const scope = isScript(panel) ? [...Object.keys(state.style_tokens), "palette", "colors"] :
+    [...labelStyles, ...(panel.type === "text" ? ["annotation_pt"] :
+      panel.type === "legend" ? ["legend_text_pt", "colors", "line_data_pt", "marker_size_pt"] : [])];
+  const available = scope.filter(key => !key.startsWith("label_offset_") &&
+    !["margin_mm", "gutter_mm"].includes(key) && !Object.hasOwn(panel.overrides, key));
+  controls.push(selectField("Add override", [["", "Select setting"], ...available.map(key => [key, titleFor(key)])],
     "", key => {
       if (!key) return;
       const value = key === "palette" ? state.project.palettes.active || "okabe-ito" :
@@ -732,19 +1111,21 @@ function nativeInspector(panel) {
     const keys = Object.keys({ ...state.project.palettes.colors, ...panel.overrides.colors });
     const selectedKeys = settings.keys || keys;
     return [options("Direction", "direction", ["vertical", "horizontal"], "vertical"),
-      options("Swatch", "swatch", ["patch", "line", "point"], "patch"),
-      section("Semantic groups", keys.map(key => checkField(key, selectedKeys.includes(key), include =>
+      selectField("Symbol", [["patch", "Box"], ["line", "Line"], ["point", "Point"]],
+        settings.swatch || "patch", value => update("swatch", value)),
+      section("Groups", keys.map(key => checkField(key, selectedKeys.includes(key), include =>
         update("keys", keys.filter(item => item === key ? include : selectedKeys.includes(item))))), true)];
   }
   const asset = document.createElement("p");
   asset.className = "asset-meta";
   const dpi = render.metadata?.effective_dpi?.[0];
-  asset.textContent = [settings.filename || "No asset imported", dpi ? `${Math.round(dpi)} effective dpi` : "",
-    panel.type === "vector" ? "Original vector style" : "", render.error].filter(Boolean).join(" · ");
-  const controls = [asset, button("Import file", () => {
-    const path = prompt(panel.type === "vector" ? "Path to a PDF or SVG" : "Path to an image");
-    if (path) commit("/api/asset", { panel: panel.id, path });
+  asset.textContent = dpi && settings.filename ? `${settings.filename} (${Math.round(dpi)} dpi)` : settings.filename || "";
+  const vector = panel.type === "vector";
+  const controls = [button(settings.filename ? "Replace file…" : "Import file…", () => {
+    askValue(vector ? "Import vector" : "Import image", vector ? "PDF or SVG path" : "Image path", "Import",
+      path => commit("/api/asset", { panel: panel.id, path }));
   })];
+  if (asset.textContent) controls.unshift(asset);
   if (panel.type === "image") {
     controls.push(options("Fit", "fit", ["contain", "cover"], "contain"),
       stringField("Crop x, y, w, h (0–1)", (settings.crop || [0, 0, 1, 1]).join(", "), value =>
@@ -756,35 +1137,59 @@ function nativeInspector(panel) {
 function drawAlignment(panel) {
   const groups = state.project.alignment;
   const others = state.project.panels.filter(item => item.id !== panel.id && isScript(item));
-  const controls = [];
+  const help = document.createElement("p");
+  help.className = "inspector-hint";
+  help.textContent = "Use the same plot margins across panels. Each plot follows its panel’s position and size.";
+  const controls = [help];
   for (const axis of ["row", "column"]) {
     const current = groups.find(group => group.axis === axis && group.panels.includes(panel.id));
     const members = new Set(current?.panels || [panel.id]);
     const options = others.map(item => checkField(item.name, members.has(item.id), checked => {
       if (checked) members.add(item.id);
       else members.delete(item.id);
+      apply.disabled = members.size < 2;
     }));
-    const apply = button(`Set ${axis} lock`, () => change(project => {
-      if (members.size < 2) throw new Error("Select another script panel for this lock.");
+    const apply = button("Apply", () => change(project => {
       project.alignment = project.alignment.filter(group =>
         group.axis !== axis || !group.panels.includes(panel.id));
       project.alignment.push({ axis, panels: [...members] });
     }));
-    apply.disabled = !others.length;
-    const remove = button(`Remove ${axis} lock`, () => change(project => {
+    apply.disabled = members.size < 2;
+    const remove = button("Remove lock", () => change(project => {
       project.alignment = project.alignment.filter(group =>
         group.axis !== axis || !group.panels.includes(panel.id));
     }));
-    controls.push(section(axis === "row" ? "Row · top and bottom" : "Column · left and right",
+    controls.push(section(axis === "row" ? "Row · Top and bottom" : "Column · Left and right",
       [...options, apply, ...(current ? [remove] : [])], Boolean(current)));
   }
-  return section("Plot alignment", controls, groups.some(group => group.panels.includes(panel.id)));
+  const alignment = section("Plot alignment", controls);
+  const count = groups.filter(group => group.panels.includes(panel.id)).length;
+  if (count) {
+    const status = document.createElement("span");
+    status.className = "disclosure-status";
+    status.textContent = `${count} active`;
+    alignment.firstElementChild.append(status);
+  }
+  return alignment;
+}
+
+function drawGeometryReferences(panel) {
+  const refs = panel.settings.geometry_refs || [];
+  const hint = document.createElement("p");
+  hint.className = "inspector-hint";
+  hint.textContent = "Give the script access to these panels’ positions and sizes. The script rerenders when their relative geometry changes.";
+  const options = state.project.panels.filter(item => item.id !== panel.id).map(item =>
+    checkField(item.name, refs.includes(item.id), checked => editPanel(panel, p => {
+      p.settings.geometry_refs = checked ? [...refs, item.id] : refs.filter(id => id !== item.id);
+    })));
+  return section("Referenced panels", [hint, ...options]);
 }
 
 function drawPanelInspector(panel) {
   const {x, y, w, h} = state.geometry.rects[panel.id];
+  const dimensionNames = { x: "X", y: "Y", w: "Width", h: "Height" };
   const dimensions = Object.entries({x, y, w, h}).map(([key, value]) =>
-    numeric(`${key.toUpperCase()} (mm)`, Number(value.toFixed(5)),
+    numeric(`${dimensionNames[key]} (mm)`, Number(value.toFixed(5)),
       next => layout("edit", { field: key, value: next })));
   const locks = ["w", "h"].map(key => {
     const box = document.createElement("input");
@@ -792,22 +1197,65 @@ function drawPanelInspector(panel) {
     box.onchange = () => layout("lock", { field: key, enabled: box.checked });
     return field(key === "w" ? "Lock width" : "Lock height", box);
   });
-  const basics = [
-    stringField("Panel name", panel.name, value => editPanel(panel, p => { p.name = value.trim() || p.name; })),
-    stringField("Manual label", panel.label, value => editPanel(panel, p => { p.label = value; })),
-    section("Geometry", [...dimensions, ...locks], true),
+  const script = isScript(panel);
+  const identity = fieldGrid([
+    stringField("Name", panel.name, value => editPanel(panel, p => { p.name = value.trim() || p.name; })),
+    stringField("Label", panel.label, value => editPanel(panel, p => { p.label = value; })),
+  ]);
+  identity.classList.add("panel-identity-fields");
+  const controls = [
+    inspectorGroup("Panel", [identity]),
+    inspectorGroup("Geometry", [fieldGrid(dimensions), fieldGrid(locks),
+      ...(script ? [drawAlignment(panel), drawGeometryReferences(panel)] : [])]),
+    inspectorGroup("Appearance", [drawOverrides(panel)]),
   ];
-  if (!isScript(panel)) {
-    $("#settings").replaceChildren(...basics, ...nativeInspector(panel), drawOverrides(panel),
-      button("Refresh panel", () => refresh([panel.id])),
-      button("Delete panel", () => layout("delete")));
-    return;
+  if (script) {
+    const editScript = button("Edit script", () => openEditor(panel.id));
+    editScript.id = "edit-script";
+    editScript.className = "inspector-edit";
+    editScript.prepend(icon("code"));
+    controls.push(inspectorGroup("Source", [editScript, section("Interpreter", [
+      interpreterField("Interpreter path", panel.type, panel.interpreter,
+        value => editPanel(panel, p => { p.interpreter = value; })),
+    ])]));
+  } else controls.splice(1, 0, inspectorGroup("Content", nativeInspector(panel)));
+  const actions = document.createElement("div");
+  actions.className = "panel-actions";
+  const group = state.project.groups?.find(item => item.panels.includes(panel.id));
+  if (group) actions.append(button("Remove from group", () => change(project => {
+    const record = project.groups.find(item => item.id === group.id);
+    record.panels = record.panels.filter(id => id !== panel.id);
+    if (record.panels.length < 2) project.groups = project.groups.filter(item => item.id !== group.id);
+  })));
+  if (state.project.panels.length > 1) {
+    const front = button("Bring to front", () => layout("stack", {direction: "front"}));
+    const back = button("Send to back", () => layout("stack", {direction: "back"}));
+    front.disabled = state.project.panels.at(-1).id === panel.id;
+    back.disabled = state.project.panels[0].id === panel.id;
+    actions.append(front, back);
   }
-  $("#settings").replaceChildren(...basics,
-    interpreterField("Interpreter override", panel.type, panel.interpreter,
-      value => editPanel(panel, p => { p.interpreter = value; })),
-    drawAlignment(panel), drawOverrides(panel), button("Delete panel", () => layout("delete")));
+  if (actions.childElementCount) controls.push(inspectorGroup("Arrange", [actions]));
+  $("#settings").replaceChildren(...controls);
+}
 
+async function deletePanel() {
+  const panel = state?.project.panels.find(item => item.id === selected);
+  if (!panel || busy && !automaticRefresh || panelGesture) return;
+  const draft = drafts.get(panel.id);
+  if (draft && draft.value !== draft.base &&
+      !confirm(`Delete “${panel.name}” and discard its unsaved script edits?`)) return;
+  if (await layout("delete", { panel: panel.id })) {
+    drafts.delete(panel.id);
+    $("#figure-settings").focus({ preventScroll: true });
+    report(`Deleted ${panel.name}. Use Undo to restore it.`);
+  }
+}
+
+function fieldGrid(children) {
+  const grid = document.createElement("div");
+  grid.className = "field-grid";
+  grid.append(...children);
+  return grid;
 }
 
 function interpreterField(caption, type, value, update) {
@@ -830,7 +1278,7 @@ function reconcileDraft(panel, promptConflict = true) {
   const draft = draftFor(panel);
   if (panel.script === draft.base) return draft;
   if (draft.value === draft.base || draft.value === panel.script) draft.value = panel.script;
-  else if (promptConflict && !confirm(`“${panel.name}” changed on disk. Keep your unsaved editor changes? Cancel loads the disk version.`)) {
+  else if (promptConflict && !confirm(`“${panel.name}” changed on disk. Select OK to keep your edits or Cancel to load the file from disk.`)) {
     draft.value = panel.script;
   } else if (!promptConflict) return draft;
   draft.base = panel.script;
@@ -840,10 +1288,11 @@ function reconcileDraft(panel, promptConflict = true) {
 function editorStatus(draft) {
   $("#editor-status").textContent = draft.value === draft.base ? "" : "Unsaved edits";
   $("#save-script").disabled = draft.value === draft.base;
+  syncRefresh();
 }
 
 function drawEditor(panel) {
-  const open = panel && isScript(panel);
+  const open = editorOpen && panel && isScript(panel);
   $("#script-drawer").hidden = !open;
   $(".stage").classList.toggle("with-editor", Boolean(open));
   if (!open || editorId !== panel.id) {
@@ -861,14 +1310,30 @@ function drawEditor(panel) {
     });
   } else editor.replace(draft.value);
   editorStatus(draft);
-  $("#editor-title").textContent = `${typeNames[panel.type]} · ${panel.name}`;
+  $("#editor-title").textContent = `${typeNames[panel.type]} script`;
   const render = state.renders[panel.id] || {};
-  $("#console").textContent = [render.error, render.stdout, render.stderr, ...(render.warnings || [])]
-    .filter(Boolean).join("\n") || "Run the script to see render output.";
+  showConsole([render.error, render.stdout, render.stderr, ...(render.warnings || [])]
+    .filter(Boolean).join("\n"));
+}
+
+function showConsole(message) {
+  $("#console").textContent = message;
+  $("#console").hidden = !message;
+}
+
+function openEditor(id) {
+  showChecks = false;
+  selectedCheck = null;
+  selectedGroup = null;
+  multiSelection.clear();
+  selected = id;
+  editorOpen = true;
+  draw(false);
+  $("#script-editor :is(.cm-content, textarea)")?.focus();
 }
 
 async function saveDraft(panel) {
-  if (busy || cornerDrag) return false;
+  if (busy || panelGesture) return false;
   const draft = reconcileDraft(panel);
   if (draft.value === draft.base) return true;
   busy = true;
@@ -880,6 +1345,7 @@ async function saveDraft(panel) {
         draft.base = sent;
         state = result;
         draw();
+        scheduleRefresh();
         return true;
       }
       panel.script = result.script;
@@ -887,6 +1353,7 @@ async function saveDraft(panel) {
       if (draft.value === draft.base) {
         state = await request("/api/project");
         draw();
+        scheduleRefresh();
         return true;
       }
     }
@@ -895,19 +1362,19 @@ async function saveDraft(panel) {
 }
 
 async function pollScripts() {
-  if (busy || !state) return;
+  if (busy || panelGesture || !state) return;
+  const previous = state;
   try {
     const result = await request("/api/scripts");
-    if (busy || result.id !== state.project.id) return;
+    if (busy || panelGesture || state !== previous || result.id !== state.project.id) return;
     const changed = state.project.panels.some(panel => isScript(panel) && result.scripts[panel.id] !== panel.script);
     if (changed) {
       const latest = await request("/api/project");
-      if (busy || latest.project.id !== state.project.id) return;
+      if (busy || panelGesture || state !== previous || latest.project.id !== state.project.id) return;
       state = latest;
-      drawEditor(activeScript());
-      drawCanvas();
-      drawPanels();
-      drawChecks();
+      drawRenderState();
+      scheduleRefresh();
+      reportProjectStatus();
     }
   } catch { /* The next poll can reconnect after a transient failure. */ }
 }
@@ -917,8 +1384,10 @@ function activeScript() {
 }
 
 async function runSelected() {
+  if (automaticRefresh) await automaticRefresh;
+  if (pendingChange && !await pendingChange) return;
   const panel = activeScript();
-  if (panel && await saveDraft(panel)) refresh([panel.id]);
+  if (panel && await saveDraft(panel)) await refresh([panel.id]);
 }
 
 async function findInterpreters() {
@@ -934,71 +1403,205 @@ async function findInterpreters() {
 }
 
 function drawChecks() {
+  drawRenderFailure();
   $("#show-inspector").setAttribute("aria-pressed", String(!showChecks));
   $("#show-checks").setAttribute("aria-pressed", String(showChecks));
-  $("#show-checks").textContent = `Checks${state.checks.length ? ` · ${state.checks.length}` : ""}`;
+  $("#check-count").textContent = state.checks.length;
+  $("#check-count").hidden = !state.checks.length;
   $("#settings").hidden = showChecks;
-  $("#inspector-title").hidden = showChecks;
+  $("#inspector-heading").hidden = showChecks;
   $("#checks").hidden = !showChecks;
   if (!showChecks) return;
   if (!state.checks.length) {
-    $("#checks").textContent = "No warnings.";
+    $("#checks").textContent = "No warnings";
     return;
   }
-  $("#checks").replaceChildren(...state.checks.map(check => {
+  const list = document.createElement("ul");
+  list.className = "check-list";
+  for (const check of state.checks) {
     const panel = state.project.panels.find(item => item.id === check.panel);
-    const row = button(check.message, () => {
-      if (!panel) return;
+    const item = document.createElement("li");
+    const row = panel ? button(check.message, () => {
       selectPanel(panel.id);
-      panels.get(panel.id)?.scrollIntoView({ block: "nearest", inline: "nearest" });
-    });
+      const tile = panels.get(panel.id);
+      selectedCheck = check;
+      if (check.boxes) {
+        const rect = state.geometry.rects[panel.id];
+        const box = state.renders[panel.id].box;
+        const [w, h] = check.page_pt;
+        const factor = Math.min(box.w / w, box.h / h);
+        const x = box.x + box.w / 2 + (Math.min(...check.boxes.map(b => b[0])) +
+          Math.max(...check.boxes.map(b => b[2])) - w) * factor / 2;
+        const y = box.y + box.h / 2 + (Math.min(...check.boxes.map(b => b[1])) +
+          Math.max(...check.boxes.map(b => b[3])) - h) * factor / 2;
+        if (zoom < 9) {
+          zoom = 9;
+          setView("custom");
+        } else drawCanvas();
+        const view = viewport.getBoundingClientRect();
+        const board = frame.getBoundingClientRect();
+        viewport.scrollBy(board.left + x*zoom - view.left - view.width/2,
+                          board.top + y*zoom - view.top - view.height/2);
+      } else tile?.scrollIntoView({ block: "nearest", inline: "nearest" });
+      tile?.focus({ preventScroll: true });
+    }) : document.createElement("p");
     row.className = "check-row";
-    if (!panel) row.disabled = true;
-    else if (panel.id === selected) row.classList.add("selected");
-    const title = document.createElement("small");
-    title.textContent = panel?.name || "Figure";
-    row.prepend(title);
-    return row;
-  }));
+    if (!panel) row.textContent = check.message;
+    else {
+      if (panel.id === selected) row.classList.add("selected");
+      const title = document.createElement("span");
+      title.textContent = panel.name;
+      row.prepend(title);
+    }
+    item.append(row);
+    list.append(item);
+  }
+  $("#checks").replaceChildren(list);
 }
 
-function draw() {
-  const { project, bundle } = state;
+function drawGroupInspector(group) {
+  const available = state.project.panels.filter(panel =>
+    !state.project.groups.some(item => item.panels.includes(panel.id)));
+  const settings = $("#settings");
+  settings.replaceChildren(stringField("Group name", group.name, value => change(project => {
+    project.groups.find(item => item.id === group.id).name = value.trim() || group.name;
+  })));
+  if (available.length) settings.append(selectField("Add to group",
+    [["", "Choose a panel"], ...available.map(panel => [panel.id, panel.name])], "", id => {
+      if (id) change(project => project.groups.find(item => item.id === group.id).panels.push(id));
+    }));
+  settings.append(button("Ungroup", () => change(project => {
+    project.groups = project.groups.filter(item => item.id !== group.id);
+  })), drawSelectionInspector(new Set(group.panels)));
+}
+
+function drawSelectionInspector(ids) {
+  const { bounds, entries, locks, minimums } = selectionLayout(ids);
+  const { width_mm, height_mm, minimum_mm } = state.project.size;
+  const boundsFields = [
+    ["x", "X (mm)", 0, width_mm - bounds.w],
+    ["y", "Y (mm)", 0, height_mm - bounds.h],
+    ["w", "Width (mm)", minimums.w, width_mm - bounds.x],
+    ["h", "Height (mm)", minimums.h, height_mm - bounds.y],
+  ].map(([key, caption, min, max]) => {
+    const control = numeric(caption, cleanMm(bounds[key]), value => change(project => {
+      const target = selectionLayout(ids);
+      storeSelectionBounds(project, target, { ...target.bounds, [key]: value });
+    }), cleanMm(min), cleanMm(max));
+    control.querySelector("input").disabled = key in locks;
+    return control;
+  });
+  const sizeFields = [
+    ["w", "x", "Panel width (mm)", width_mm],
+    ["h", "y", "Panel height (mm)", height_mm],
+  ].map(([dim, axis, caption, span]) => {
+    const [first] = entries;
+    const uniform = entries.every(([, rect]) => rect[dim] === first[1][dim]);
+    const max = Math.min(...entries.map(([, rect]) => span - rect[axis]));
+    const control = numeric(caption, uniform ? cleanMm(first[1][dim]) : null, value => change(project => {
+      for (const id of ids) project.layout.rects[id][dim] = value;
+    }), minimum_mm, cleanMm(max));
+    const input = control.querySelector("input");
+    if (!uniform) input.placeholder = "Mixed";
+    input.disabled = dim in locks;
+    return control;
+  });
+  const hint = document.createElement("p");
+  hint.className = "selection-hint";
+  const locked = ["width", "height"].filter(dim => dim[0] in locks);
+  hint.textContent = locked.length ? `A panel has a locked ${locked.join(" and ")}.` :
+    "Drag a corner to scale the selection.";
+  return inspectorGroup("Selection geometry", [
+    fieldGrid(boundsFields), hint, section("Set panel sizes", [fieldGrid(sizeFields)]),
+  ]);
+}
+
+function hasUnsavedScriptEdits() {
+  return state.project.panels.some(panel => {
+    const draft = drafts.get(panel.id);
+    return draft && draft.value !== draft.base;
+  });
+}
+
+function reportProjectStatus() {
+  if ($("#workspace").hidden) return;
+  if (!state.bundle) return report(hasUnsavedScriptEdits() ? "Unsaved script edits" : "Local draft");
+  const name = state.bundle.split("/").at(-1);
+  report(state.bundle_dirty || hasUnsavedScriptEdits() ? `${name} (local changes)` : name);
+  $("#status").title = state.bundle;
+}
+
+function draw(updateStatus = true) {
+  const { project } = state;
+  const group = project.groups?.find(item => item.id === selectedGroup);
+  if (!group) selectedGroup = null;
+  for (const id of multiSelection) if (!state.geometry.rects[id]) multiSelection.delete(id);
+  if (multiSelection.size === 1) {
+    selected = multiSelection.values().next().value;
+    multiSelection.clear();
+  }
   const panel = project.panels.find(item => item.id === selected);
-  if (!panel) selected = null;
+  if (!panel) {
+    selected = null;
+    editorOpen = false;
+  }
   $("#project-name").value = project.name;
   $("#measure").textContent = `${project.size.width_mm} × ${project.size.height_mm} mm`;
   $("#undo").disabled = !past.length;
   $("#redo").disabled = !future.length;
-  $("#inspector-title").textContent = panel ? panel.name : "Figure settings";
+  $("#delete-panel").disabled = !panel;
+  $("#inspector-title").textContent = panel?.name || group?.name ||
+    (multiSelection.size ? `${multiSelection.size} panels selected` : "Figure settings");
+  $("#inspector-type").textContent = panel ? (isScript(panel) ? `${typeNames[panel.type]} script` : typeNames[panel.type]) :
+    group ? "Panel group" : "";
+  $("#inspector-type").hidden = !panel && !group;
   drawEditor(panel);
   drawCanvas();
   drawPanels();
   drawChecks();
-  report(bundle || "Working copy · Save to create a .plate bundle");
-  const openGroups = new Set([...$("#settings").querySelectorAll("details[open] summary")]
-    .map(summary => summary.textContent));
-  const previousScope = $("#settings").dataset.scope;
-  const scope = panel?.id || "figure";
-  $("#settings").dataset.scope = scope;
+  syncRefresh();
+  if (updateStatus) reportProjectStatus();
+  const settings = $("#settings");
+  const scope = panel ? `panel:${panel.id}` : group ? `group:${group.id}` :
+    multiSelection.size ? "selection" : "figure";
+  const sameScope = settings.dataset.scope === scope;
+  const groups = sameScope
+    ? new Map([...settings.querySelectorAll("details")].map(item => [item.dataset.section, item.open]))
+    : new Map();
+  if (!sameScope) $("#inspector-content").scrollTop = 0;
+  settings.dataset.scope = scope;
+  const focused = settings.contains(document.activeElement) && document.activeElement.name;
   const restoreGroups = () => {
-    if (previousScope !== scope) return;
-    for (const item of $("#settings").querySelectorAll("details")) {
-      item.open ||= openGroups.has(item.querySelector("summary").textContent);
+    for (const item of settings.querySelectorAll("details")) {
+      if (groups.has(item.dataset.section)) item.open = groups.get(item.dataset.section);
     }
+    if (focused) settings.querySelector(`[name="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
   };
   if (panel) { drawPanelInspector(panel); restoreGroups(); return; }
+  if (group) { drawGroupInspector(group); restoreGroups(); return; }
+  if (multiSelection.size) {
+    settings.replaceChildren(drawSelectionInspector(new Set(multiSelection)));
+    restoreGroups();
+    return;
+  }
   const preset = document.createElement("select");
+  const matchesPreset = journals.some(journal =>
+    journal.id === project.size.preset_id && journal.widths?.includes(project.size.width_mm));
   for (const journal of journals) {
     for (const width of journal.widths || [null]) {
-      const option = new Option(width ? `${journal.name} · ${width} mm` : journal.name,
+      const option = new Option(width ? `${journal.name} (${width} mm)` : journal.name,
                                 `${journal.id}:${width}`);
       option.disabled = width === null;
       preset.add(option);
     }
   }
-  preset.value = `${project.size.preset_id}:${project.size.width_mm}`;
+  preset.add(new Option("Custom", "custom"));
+  preset.value = matchesPreset ? `${project.size.preset_id}:${project.size.width_mm}` : "custom";
   preset.onchange = () => change(p => {
+    if (preset.value === "custom") {
+      p.size.preset_id = "custom";
+      return;
+    }
     const [id, width] = preset.value.split(":");
     Object.assign(p.size, { preset_id: id, width_mm: Number(width) });
   });
@@ -1006,142 +1609,435 @@ function draw() {
   Object.assign(height, { type: "number", min: "1", step: "0.1", value: project.size.height_mm });
   height.onchange = () => change(p => { if (height.validity.valid) p.size.height_mm = height.valueAsNumber; });
   const projectOptions = [
-    stringField("Data root", project.data_root, value => change(p => { p.data_root = value; })),
-    numeric("Render timeout (seconds)", project.timeout_s, value => change(p => { p.timeout_s = value; }), 1),
+    stringField("Data folder", project.data_root, value => change(p => { p.data_root = value; })),
+    numeric("Render timeout (s)", project.timeout_s, value => change(p => { p.timeout_s = value; }), 1),
     ...["script-r", "script-py"].map(type =>
       interpreterField(type === "script-r" ? "Default Rscript" : "Default Python", type, project.interpreters[type] || "",
         value => change(p => { p.interpreters[type] = value; }))),
-    stringField("Extra venv paths (comma separated)", (project.interpreters.venvs || []).join(", "), async value => {
+    stringField("Virtual environments (comma-separated paths)", (project.interpreters.venvs || []).join(", "), async value => {
       if (await change(p => { p.interpreters.venvs = value.split(",").map(path => path.trim()).filter(Boolean); })) {
         findInterpreters();
       }
     }),
     button("Detect interpreters", findInterpreters),
-    button("Export style JSON", async () => {
+    button("Export style (.json)", async () => {
       try { downloadJson("plate-style.json", await request("/api/style-json", {})); }
       catch (error) { report(error.message); }
     }),
   ];
   $("#settings").replaceChildren(
-    section("Figure size", [field("Journal width", preset), field("Height (mm)", height),
+    inspectorGroup("Artboard", [
+      field("Journal width", preset),
+      fieldGrid([
+        ...(!matchesPreset ? [numeric("Width (mm)", project.size.width_mm,
+          width => change(p => { Object.assign(p.size, { preset_id: "custom", width_mm: width }); }), 1)] : []),
+        field("Height (mm)", height),
+        numeric("Grid spacing (mm)", state.geometry.grid_step,
+          value => change(p => { p.layout.step_mm = value; }), .5),
+      ]),
+    ]),
+    inspectorGroup("Figure style", [
+      ...Object.entries(styleGroups).map(([name, keys]) => section(name, keys.map(key =>
+        styleField(key, project.style[key], value => change(p => { p.style[key] = value; }))))),
+      drawPaletteInspector(),
+    ]),
+    inspectorGroup("Project", [section("Advanced", [
       numeric("Minimum panel size (mm)", project.size.minimum_mm,
-        value => change(p => { p.size.minimum_mm = value; }), 1)], true),
-    ...Object.entries(styleGroups).map(([name, keys]) => section(name, keys.map(key =>
-      styleField(key, project.style[key], value => change(p => { p.style[key] = value; }))))),
-    drawPaletteInspector(), section("Runtime", projectOptions));
+        value => change(p => { p.size.minimum_mm = value; }), 1), ...projectOptions,
+    ])]));
   restoreGroups();
 }
 
 async function action(name, data = {}) {
-  if (busy || cornerDrag) return;
+  if (pendingChange && !await pendingChange) return false;
+  if (automaticRefresh) await automaticRefresh;
+  if (busy || panelGesture) return;
   busy = true;
   try {
     state = await request(`/api/${name}`, data);
-    if (name === "new" || name === "open") {
+    if (["new", "open", "resume"].includes(name)) {
       selected = null; past = []; future = []; drafts.clear();
+      selectedGroup = null; multiSelection.clear(); selectedCheck = null;
+      editorOpen = false; showChecks = false;
+      $("#panel-handles").removeAttribute("data-panel");
+      showEditor();
       findInterpreters();
     }
     draw();
+    scheduleRefresh();
     return true;
   }
   catch (error) { report(error.message); return false; }
   finally { busy = false; }
 }
 
-async function addPanel(target = selected, edge = "right", autoRender = false) {
-  const type = $("#panel-type").value;
+const projectModule = import("/vendor/projects.js").catch(() => null);
+
+async function loadLibrary() {
+  const id = ++libraryLoad;
+  const container = $("#project-library");
+  container.setAttribute("aria-busy", "true");
+  try {
+    const [module, projects] = await Promise.all([projectModule, request("/api/projects")]);
+    if (id !== libraryLoad) return;
+    if (!module) throw new Error("The project browser is unavailable. Run make editor and reload Plate.");
+    renderLibrary ||= module.mountProjects(container, workspace => {
+      if (hasEditorProject && state.workspace_id === workspace) showEditor();
+      else if (canSwitchProject()) action("resume", { workspace });
+    });
+    renderLibrary(projects);
+  } catch (error) {
+    if (id !== libraryLoad) return;
+    if (renderLibrary) report(error.message);
+    else container.querySelector(".library-message").textContent = error.message;
+  } finally {
+    if (id === libraryLoad) container.setAttribute("aria-busy", "false");
+  }
+}
+
+function showHome(focus = true) {
+  if ($(":popover-open")) $(":popover-open").hidePopover();
+  $("#workspace").hidden = true;
+  $(".project-crumb").hidden = true;
+  $(".project-actions").hidden = true;
+  $("#home").hidden = false;
+  $("#return-to-editor").hidden = !hasEditorProject;
+  $(".skip-link").hash = "#home";
+  report("");
+  loadLibrary();
+  if (focus) $("#home").focus({ preventScroll: true });
+}
+
+function showEditor(focus = true) {
+  hasEditorProject = true;
+  $("#home").hidden = true;
+  $("#return-to-editor").hidden = true;
+  $(".project-crumb").hidden = false;
+  $(".project-actions").hidden = false;
+  $("#workspace").hidden = false;
+  $(".skip-link").hash = "#workspace";
+  drawCanvas();
+  reportProjectStatus();
+  if (focus) requestAnimationFrame(() => {
+    if (!$("#workspace").hidden) $("#workspace").focus({ preventScroll: true });
+  });
+}
+
+function formError(selector, message = "") {
+  const error = $(selector);
+  error.textContent = message;
+  error.hidden = !message;
+}
+
+const inputDialog = $("#input-dialog");
+function askValue(title, label, submitLabel, onSubmit) {
+  const form = $("#input-form");
+  const submit = form.querySelector("button[type=submit]");
+  $("#input-title").textContent = title;
+  $("#input-label").textContent = label;
+  $("#input-value").value = "";
+  submit.textContent = submitLabel;
+  formError("#input-error");
+  form.onsubmit = async event => {
+    event.preventDefault();
+    const value = $("#input-value").value.trim();
+    if (!value) {
+      formError("#input-error", `Enter a value for ${label.toLowerCase()}.`);
+      return;
+    }
+    submit.disabled = true;
+    formError("#input-error");
+    try {
+      const result = await onSubmit(value);
+      if (result) inputDialog.close();
+      else if (result === false) formError("#input-error", $("#status").textContent);
+    } catch (error) {
+      formError("#input-error", error.message);
+    } finally {
+      submit.disabled = false;
+    }
+  };
+  inputDialog.showModal();
+}
+$("#cancel-input").onclick = () => inputDialog.close();
+
+async function addPanel(type, position) {
   const name = `${typeNames[type]} panel`;
-  if (await layout("add", { type, name, panel: target, edge }, autoRender)) {
+  if (await layout("add", { type, name, position })) {
     showChecks = false;
     selectPanel(state.project.panels.at(-1).id);
   }
 }
-$("#add").onclick = () => addPanel();
-$("#add").draggable = true;
-$("#add").title = "Click to split the selection, or drag to a target";
-$("#add").ondragstart = event => dragPanel(event, "new");
-$("#add").ondragend = endDrag;
-$("#frame").onclick = event => { if (event.target === $("#frame")) selectPanel(null); };
+for (const [type, name] of Object.entries(typeNames)) {
+  const option = button(name, () => {
+    $("#panel-types").hidePopover();
+    addPanel(type);
+  });
+  option.prepend(icon(typeIcons[type]));
+  option.draggable = true;
+  option.ondragstart = event => startListDrag(event, null, type);
+  option.ondragend = endDrag;
+  $("#panel-types").append(option);
+}
+
+for (const popup of document.querySelectorAll(".popover")) {
+  popup.addEventListener("toggle", event => {
+    if (event.newState !== "open") return;
+    const trigger = event.source || document.querySelector(`[popovertarget="${popup.id}"]`);
+    const anchor = trigger.getBoundingClientRect();
+    const below = anchor.bottom + 4;
+    popup.style.left = `${Math.max(8, Math.min(anchor.left, innerWidth - popup.offsetWidth - 8))}px`;
+    popup.style.top = `${below + popup.offsetHeight <= innerHeight ? below :
+      Math.max(8, anchor.top - popup.offsetHeight - 4)}px`;
+    popup.querySelector("button:enabled")?.focus({ preventScroll: true });
+  });
+}
+
+$("#figure-settings").onclick = () => {
+  showChecks = false;
+  selectPanel(null);
+};
+$("#group-panels").onclick = () => {
+  if (!canGroupSelection()) return;
+  const group = {id: crypto.randomUUID(), panels: [...multiSelection], name: ""};
+  askValue("Group panels", "Group name", "Group", async name => {
+    group.name = name;
+    if (!await change(project => { (project.groups ||= []).push(group); })) return false;
+    selectGroup(group);
+    return true;
+  });
+};
+$("#frame").ondragover = event => {
+  if (!draggedType && !dragged) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = draggedType ? "copy" : "move";
+};
+$("#frame").ondrop = event => {
+  if (!draggedType && !dragged) return;
+  event.preventDefault();
+  const frame = $("#frame").getBoundingClientRect();
+  const {width_mm, height_mm} = state.project.size;
+  const position = {x: snapped((event.clientX - frame.left) / zoom, 0, width_mm),
+                    y: snapped((event.clientY - frame.top) / zoom, 0, height_mm)};
+  const type = draggedType;
+  const id = dragged;
+  endDrag();
+  if (type) addPanel(type, position);
+  else {
+    const panel = state.project.panels.find(item => item.id === id);
+    const rect = state.geometry.rects[id];
+    if (rect) layout("place", {panel: id, rect: panelPlacement(rect, panel.locks, null,
+      position.x - rect.x, position.y - rect.y)});
+  }
+};
 $("#undo").onclick = () => history(past, future);
 $("#redo").onclick = () => history(future, past);
-function setView(mode) { viewMode = mode; drawCanvas(); }
+$("#delete-panel").onclick = deletePanel;
+function setView(mode) { if (state) { viewMode = mode; drawCanvas(); } }
 $("#fit-view").onclick = () => setView("fit");
-$("#actual-size").onclick = () => {
-  if (!state.pixels_per_mm) $("#calibrate").click();
-  else setView("actual");
+$("#fit-width").onclick = () => {
+  setView("width");
+  viewport.scrollTo(0, 0);
 };
-$("#zoom-out").onclick = () => { zoom = Math.max(.1, zoom / 1.2); setView("custom"); };
-$("#zoom-in").onclick = () => { zoom = Math.min(25, zoom * 1.2); setView("custom"); };
-new ResizeObserver(() => { if (state && viewMode === "fit") drawCanvas(); }).observe($(".viewport"));
-const calibration = $("#calibration-dialog");
-const scaleInput = $("#calibration-scale");
-scaleInput.oninput = () => {
-  $("#calibration-ruler").style.width = `${50 * scaleInput.valueAsNumber}px`;
+$("#actual-size").onclick = () => setView("actual");
+$("#show-grid").onclick = event => {
+  const visible = $("#frame").classList.toggle("show-grid");
+  event.currentTarget.setAttribute("aria-pressed", String(visible));
 };
-$("#calibrate").onclick = () => {
-  scaleInput.value = calibratedScale();
-  scaleInput.oninput();
-  calibration.showModal();
-};
-$("#cancel-calibrate").onclick = () => calibration.close();
-$("#calibration-form").onsubmit = async event => {
+const viewport = $(".viewport");
+const frame = $("#frame");
+viewport.addEventListener("pointerdown", startMarquee);
+viewport.addEventListener("click", event => {
+  if (state && event.pointerType === "touch" && (event.target === frame || event.target === viewport)) {
+    selectPanels(new Set());
+  }
+});
+let zoomFrame;
+function zoomAt(scale, clientX, clientY) {
+  if (!state || panelGesture || dragged || draggedType) return;
+  const next = Math.min(25, Math.max(.1, scale));
+  if (next === zoom) return;
+  const view = viewport.getBoundingClientRect();
+  const before = frame.getBoundingClientRect();
+  const x = clientX ?? (view.left + view.width / 2);
+  const y = clientY ?? (view.top + view.height / 2);
+  const ratio = next / zoom;
+  zoom = next;
+  frame.classList.add("zooming");
+  setView("custom");
+  const after = frame.getBoundingClientRect();
+  viewport.scrollBy(after.left + (x - before.left) * ratio - x,
+                    after.top + (y - before.top) * ratio - y);
+  cancelAnimationFrame(zoomFrame);
+  zoomFrame = requestAnimationFrame(() => frame.classList.remove("zooming"));
+}
+$("#zoom-out").onclick = () => zoomAt(zoom / 1.2);
+$("#zoom-in").onclick = () => zoomAt(zoom * 1.2);
+let gestureZoom;
+viewport.addEventListener("wheel", event => {
+  if (!event.ctrlKey) return;
   event.preventDefault();
-  try {
-    const result = await request("/api/calibrate", { pixels_per_mm: scaleInput.valueAsNumber });
-    state.pixels_per_mm = result.pixels_per_mm;
-    calibration.close();
-    setView("actual");
-  } catch (error) { report(error.message); }
-};
+  if (gestureZoom !== undefined) return;
+  const factor = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.clientHeight : 1;
+  zoomAt(zoom * Math.exp(-event.deltaY * factor * .01), event.clientX, event.clientY);
+}, { passive: false });
+viewport.addEventListener("gesturestart", event => {
+  event.preventDefault();
+  gestureZoom = zoom;
+}, { passive: false });
+viewport.addEventListener("gesturechange", event => {
+  if (gestureZoom === undefined) return;
+  event.preventDefault();
+  zoomAt(gestureZoom * event.scale, event.clientX, event.clientY);
+}, { passive: false });
+viewport.addEventListener("gestureend", event => {
+  if (gestureZoom === undefined) return;
+  event.preventDefault();
+  gestureZoom = undefined;
+}, { passive: false });
+new ResizeObserver(() => {
+  if (state && (viewMode === "fit" || viewMode === "width")) drawCanvas();
+}).observe(viewport);
+
+const workbench = $("#workspace");
+for (const divider of workbench.querySelectorAll(".sidebar-divider")) {
+  const side = divider.dataset.side;
+  const left = side === "left";
+  const pane = document.getElementById(divider.getAttribute("aria-controls"));
+  const minimum = left ? 148 : 224;
+  const maximum = () => Math.min(left ? 360 : 440,
+    Math.floor(workbench.clientWidth * (left ? .29 : .39)));
+  let drag;
+
+  function announce(width) {
+    divider.setAttribute("aria-valuemin", minimum);
+    divider.setAttribute("aria-valuemax", maximum());
+    divider.setAttribute("aria-valuenow", width);
+    divider.setAttribute("aria-valuetext", `${width} pixels`);
+  }
+
+  function resize(width) {
+    const next = clamp(Math.round(width), minimum, maximum());
+    workbench.style.setProperty(`--sidebar-${side}`, `${next}px`);
+    announce(next);
+  }
+
+  divider.onpointerdown = event => {
+    if (drag || event.button !== 0) return;
+    event.preventDefault();
+    divider.focus({ preventScroll: true });
+    divider.setPointerCapture(event.pointerId);
+    divider.dataset.dragging = "";
+    drag = { id: event.pointerId, x: event.clientX, width: pane.offsetWidth };
+  };
+  divider.onpointermove = event => {
+    if (drag?.id === event.pointerId) resize(drag.width + (event.clientX - drag.x) * (left ? 1 : -1));
+  };
+  divider.onlostpointercapture = event => {
+    if (drag?.id !== event.pointerId) return;
+    drag = undefined;
+    delete divider.dataset.dragging;
+  };
+  divider.onkeydown = event => {
+    const step = (event.shiftKey ? 48 : 16) * (left ? 1 : -1);
+    const keys = { ArrowLeft: pane.offsetWidth - step, ArrowRight: pane.offsetWidth + step,
+      Home: minimum, End: maximum() };
+    if (!Object.hasOwn(keys, event.key)) return;
+    event.preventDefault();
+    resize(keys[event.key]);
+  };
+  divider.ondblclick = () => {
+    workbench.style.removeProperty(`--sidebar-${side}`);
+    announce(pane.offsetWidth);
+  };
+  new ResizeObserver(() => {
+    if (divider.offsetWidth) announce(pane.offsetWidth);
+  }).observe(workbench);
+}
+
 document.addEventListener("keydown", event => {
-  if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "z"
-      || event.target.matches("input, textarea, [contenteditable]")) return;
+  if ($("#workspace").hidden || event.defaultPrevented ||
+      event.target.closest("input, textarea, select, [contenteditable], dialog, :popover-open")) return;
+  if (event.key === "Escape" && state && !panelGesture && selectedPanelIds().size) {
+    event.preventDefault();
+    selectPanels(new Set());
+    return;
+  }
+  if (["Delete", "Backspace"].includes(event.key) && !event.metaKey && !event.ctrlKey && !event.altKey && selected) {
+    event.preventDefault();
+    if (!event.repeat) deletePanel();
+    return;
+  }
+  if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "z") return;
   event.preventDefault();
   if (event.shiftKey) history(future, past);
   else history(past, future);
 });
 
-$("#show-inspector").onclick = () => { showChecks = false; drawChecks(); };
-$("#show-checks").onclick = () => { showChecks = true; drawChecks(); };
+$("#show-inspector").onclick = () => { if (state) { showChecks = false; drawChecks(); } };
+$("#show-checks").onclick = () => { if (state) { showChecks = true; drawChecks(); } };
 
 const exportDialog = $("#export-dialog");
-$("#export-format").onchange = () => { $("#dpi-field").hidden = $("#export-format").value === "pdf"; };
-$("#export").onclick = () => {
-  if (busy) return;
-  const descriptions = { "font-size": "small text", "font-family": "font mismatch", "raster-dpi": "low dpi",
-    stale: "stale", "render-error": "render error", preset: "provisional preset", "script-path": "absolute path", alignment: "alignment warning" };
-  const counts = {};
-  for (const item of state.checks) counts[item.kind] = (counts[item.kind] || 0) + 1;
-  $("#export-warnings").textContent = Object.entries(counts)
-    .map(([key, count]) => `${count} ${descriptions[key]}`).join(" · ");
-  $("#export-path").value = state.bundle.replace(/\.plate$/i, ".pdf");
+$("#export-format").onchange = () => {
+  const format = $("#export-format").value;
+  const path = $("#export-path");
+  $("#dpi-field").hidden = format === "pdf";
+  path.placeholder = `/path/to/figure.${format}`;
+  path.value = path.value.replace(/\.(pdf|png|tiff?)$/i, `.${format}`);
+};
+$("#export").onclick = async () => {
+  if (automaticRefresh) await automaticRefresh;
+  if (!state || busy) return;
+  const stale = stalePanels();
+  if (stale.length) await refresh(stale);
+  const count = state.checks.length;
+  $("#export-warnings").hidden = !count;
+  $("#export-warnings").textContent = `Review ${count} ${count === 1 ? "warning" : "warnings"}`;
+  formError("#export-error");
+  const format = $("#export-format").value;
+  $("#export-path").value = state.bundle.replace(/\.plate$/i, `.${format}`);
   $("#export-format").onchange();
   exportDialog.showModal();
+};
+$("#export-warnings").onclick = () => {
+  exportDialog.close();
+  $("#show-checks").click();
+  $("#show-checks").focus();
 };
 $("#cancel-export").onclick = () => exportDialog.close();
 $("#export-form").onsubmit = async event => {
   event.preventDefault();
   const submit = event.submitter;
   submit.disabled = true;
+  formError("#export-error");
   try {
     const result = await request("/api/export", {
       format: $("#export-format").value, dpi: Number($("#export-dpi").value), path: $("#export-path").value,
     });
     exportDialog.close();
     report(`Exported ${result.path}`);
-  } catch (error) { $("#export-warnings").textContent = error.message; }
+  } catch (error) { formError("#export-error", error.message); }
   finally { submit.disabled = false; }
 };
 $("#save-script").onclick = () => { const panel = activeScript(); if (panel) saveDraft(panel); };
 $("#run-script").onclick = runSelected;
+$("#close-editor").onclick = () => {
+  editorOpen = false;
+  drawEditor(activeScript());
+  $("#edit-script")?.focus();
+};
+$("#script-actions").addEventListener("click", event => {
+  if (event.target.matches("button:enabled")) $("#script-actions").hidePopover();
+});
 $("#dependencies").onclick = async () => {
   const panel = activeScript();
   if (!panel) return;
   try {
     const info = await request("/api/dependencies", { panel: panel.id });
-    $("#console").textContent = info.missing.length ? `Missing ${info.missing.join(", ")}\n${info.install}` :
-      `${info.path} · ${info.version}\nRequired packages are available.`;
-  } catch (error) { $("#console").textContent = error.message; }
+    if (editorId !== panel.id) return;
+    showConsole(info.missing.length ? `Missing packages: ${info.missing.join(", ")}\n${info.install}` :
+      `${info.version}\n${info.path}\nRequired packages are installed.`);
+  } catch (error) { if (editorId === panel.id) showConsole(error.message); }
 };
 $("#reveal-script").onclick = async () => {
   const panel = activeScript();
@@ -1149,32 +2045,54 @@ $("#reveal-script").onclick = async () => {
   try { report((await request("/api/reveal-script", { panel: panel.id })).path); }
   catch (error) { report(error.message); }
 };
-async function refreshAll() {
-  if (await saveAllDrafts()) refresh();
+async function refreshSelected() {
+  if (automaticRefresh) await automaticRefresh;
+  if (pendingChange && !await pendingChange) return;
+  const panel = activeScript();
+  if (panel) await runSelected();
+  else if (selected) await refresh([selected]);
 }
+async function refreshAll() {
+  if (automaticRefresh) await automaticRefresh;
+  if (pendingChange && !await pendingChange) return;
+  if (state && await saveAllDrafts()) await refresh();
+}
+$("#refresh-selected").onclick = refreshSelected;
 $("#refresh-all").onclick = refreshAll;
 document.addEventListener("keydown", event => {
-  if (!(event.metaKey || event.ctrlKey) || event.key !== "Enter") return;
+  if (!state || $("#workspace").hidden || document.querySelector("dialog[open]") ||
+      !(event.metaKey || event.ctrlKey) || event.key !== "Enter") return;
   event.preventDefault();
   if (event.shiftKey) refreshAll();
-  else if (activeScript()) runSelected();
-  else if (selected) refresh([selected]);
+  else if (selected) refreshSelected();
 });
 function canSwitchProject() {
-  return ![...drafts.values()].some(draft => draft.value !== draft.base)
-    || confirm("Leave this project with unsaved script edits?");
+  return !hasUnsavedScriptEdits() || confirm("Discard unsaved script edits in this project?");
 }
 
+$("#file-actions").addEventListener("click", event => {
+  if (event.target.closest("button:enabled")) $("#file-actions").hidePopover();
+});
 $("#project-folder").onclick = async () => {
   try { report((await request("/api/reveal-workspace", {})).path); }
   catch (error) { report(error.message); }
 };
-$("#new").onclick = () => { if (canSwitchProject()) action("new"); };
-$("#open").onclick = () => {
-  const path = prompt("Path to a .plate bundle");
-  if (path && canSwitchProject()) action("open", { path });
-};
+function newProject() {
+  if (state && (!busy || automaticRefresh || pendingChange) && canSwitchProject()) action("new");
+}
+
+function openProject() {
+  if (!state || busy && !automaticRefresh && !pendingChange) return;
+  askValue("Open project", "Path to a .plate file", "Open",
+    path => canSwitchProject() ? action("open", { path }) : undefined);
+}
+
+$("#home-button").onclick = () => showHome();
+$("#return-to-editor").onclick = () => showEditor();
+$("#new").onclick = $("#home-new").onclick = newProject;
+$("#open").onclick = $("#home-open").onclick = openProject;
 async function saveAllDrafts() {
+  if (automaticRefresh) await automaticRefresh;
   if (busy) return false;
   for (const panel of state.project.panels.filter(isScript)) {
     const draft = drafts.get(panel.id);
@@ -1184,25 +2102,57 @@ async function saveAllDrafts() {
 }
 
 const saveDialog = $("#save-dialog");
-$("#save").onclick = () => {
-  if (busy) return;
+function showSaveDialog() {
+  if (!state || (busy && !automaticRefresh)) return;
   $("#bundle-path").value = state.bundle;
   $("#bundle-cache").checked = Boolean(state.keep_cache);
+  formError("#save-error");
   saveDialog.showModal();
+}
+$("#save-as").onclick = showSaveDialog;
+$("#save").onclick = async () => {
+  if (!state || (busy && !automaticRefresh)) return;
+  if (!state.bundle) return showSaveDialog();
+  if (await saveAllDrafts()) await action("save", { cache: Boolean(state.keep_cache) });
 };
 $("#cancel-save").onclick = () => saveDialog.close();
 $("#save-form").onsubmit = async event => {
   event.preventDefault();
-  if (!await saveAllDrafts()) return;
-  if (await action("save", { path: $("#bundle-path").value, cache: $("#bundle-cache").checked })) {
-    saveDialog.close();
+  const submit = event.submitter;
+  submit.disabled = true;
+  formError("#save-error");
+  try {
+    if (await saveAllDrafts() &&
+        await action("save", { path: $("#bundle-path").value, cache: $("#bundle-cache").checked })) {
+      saveDialog.close();
+    } else {
+      formError("#save-error", $("#status").textContent);
+    }
+  } finally {
+    submit.disabled = false;
   }
 };
+document.addEventListener("keydown", event => {
+  if (!state || $("#workspace").hidden || document.querySelector("dialog[open]") ||
+      !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "s") return;
+  event.preventDefault();
+  if (event.shiftKey) showSaveDialog();
+  else $("#save").click();
+});
+window.addEventListener("beforeunload", event => {
+  if (!state || !hasUnsavedScriptEdits()) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
 $("#project-name").onchange = event => change(p => { p.name = event.target.value.trim() || "Untitled figure"; });
 
 try {
   [state, journals] = await Promise.all([request("/api/project"), request("/api/presets")]);
+  $("#home-open").disabled = $("#home-new").disabled = false;
+  if (state.workspace_registered) showEditor(false);
+  else showHome(false);
   draw();
+  scheduleRefresh();
   findInterpreters();
   setInterval(pollScripts, 1000);
 } catch (error) { report(error.message); }

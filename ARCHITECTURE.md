@@ -5,10 +5,12 @@ Plate uses Python for physical geometry, workspace I/O, subprocess management an
 ```mermaid
 flowchart LR
   UI[Browser canvas and CodeMirror] <--> HTTP[Loopback HTTP session]
-  HTTP --> Layout[Guillotine layout solver]
-  HTTP <--> Disk[Workspace and .plate ZIP]
+  CLI[JSON command line] --> Session
+  HTTP --> Session[Plate session]
+  Session --> Layout[Artboard geometry]
+  Session <--> Disk[Workspace and .plate ZIP]
   Watch[Script file watcher] --> Disk
-  HTTP --> Resolve[Style and palette resolver]
+  Session --> Resolve[Style and palette resolver]
   Resolve --> Run[Fresh R or Python process]
   Run --> Cache[Panel PDF, metadata and PNG cache]
   Cache --> Check[Print checks]
@@ -17,11 +19,13 @@ flowchart LR
   Compose --> Raster[RGB PNG and TIFF]
 ```
 
-## Project and solver
+The CLI opens a temporary workspace for each invocation and uses the same session methods as the browser. The saved bundle carries the layout, scripts, imported assets and render cache between invocations. [Command reference](docs/cli.md)
 
-`Project` stores `FigureSize`, style tokens, palette records, semantic colours, interpreter paths, panel settings and the split tree. `FigureSize` stores the journal ID, width, height and minimum panel span in mm. Spacing tokens store the margin and gutter. Panel IDs identify the leaves and workspace files. Geometry is derived from the split tree and all text and stroke sizes are stored in pt.
+## Project and layout
 
-The solver recursively computes the minimum and optional fixed span in both dimensions. A split sums its children and gutters along its axis. Perpendicular to the split it uses the greatest child minimum and reconciles fixed spans. The top-down pass distributes each span by weight after reserving fixed spans, and clamps any undersized child before redistributing. Every layout operation validates the candidate before committing it. Resize operations link collinear gutters and clamp to the capacity shared by all affected splits. Numeric changes act on the same gutters. The browser keeps project snapshots for undo and redo and previews a drag locally until the release submits a solver operation.
+`Project` stores a figure size and an independent artboard rectangle for each panel. Positions, dimensions and the snap interval use mm. Typography and stroke widths use pt. Panel list order defines stacking from back to front in the canvas and in export.
+
+The browser snaps pointer and keyboard edits to the grid and previews them locally. The server validates the final rectangle, including artboard bounds and any locked dimensions. Numeric edits keep their exact measurements. When a legacy split-tree bundle opens, Plate resolves its existing geometry into independent rectangles. The browser keeps project snapshots for undo and redo.
 
 The ZIP format separates `manifest.json`, `layout.json`, `style.json`, `palettes.json`, panel metadata and real script files. Imported assets use content-addressed paths. The loader validates entry names and invokes the schema migration hook. The workspace stores autosaved metadata. Save writes a sibling temporary ZIP and renames it over the destination.
 
@@ -34,7 +38,7 @@ sequenceDiagram
   participant C as Workspace cache
   participant W as Rscript or Python
   participant P as PDF reader
-  U->>S: Refresh stale panel
+  U->>S: Open project or change panel inputs
   S->>S: Resolve style, plot box and interpreter
   S->>C: Look up content hash
   alt Cache miss
@@ -52,7 +56,7 @@ sequenceDiagram
   S-->>U: Updated previews and checks
 ```
 
-Every script runs in a fresh process group. R starts with `--vanilla`, Python uses a noninteractive Matplotlib backend, and the workers receive context through `PLATE_STYLE`. Scripts run from the data root. A timeout terminates the process group. The cache keys contain source, resolved context, content size, interpreter path and version, working directory and the render contract version. An alignment group adds the member signatures and positions to the refresh state. The data root remains user-managed, so the cache does not watch external data files.
+Every script runs in a fresh process group. R starts with `--vanilla`, Python uses a noninteractive Matplotlib backend, and the workers receive context through `PLATE_STYLE`. Scripts run from the data root. A timeout terminates the process group. The cache keys contain source, resolved context, content size, interpreter path and version, working directory and the render contract version. An alignment group adds the member signatures and dimensions to the refresh state. Plot alignment shares physical insets from each panel’s edges, so the plot area follows its panel dimensions. Moving a panel shifts its axes along with it and reuses its render. The data root remains user-managed, so the cache does not watch external data files.
 
 A refresh runs up to three plotting subprocesses at once. Each alignment pass waits for its input measurements. The request thread processes the PDFs and records results as subprocesses finish. Plate shares Matplotlib's font inventory across workspaces so opening another figure can reuse it.
 

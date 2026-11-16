@@ -57,6 +57,23 @@ def get_font(family, bold=False):
     return pymupdf.Font(fontfile=str(path))
 
 
+def label_metrics(label, width, height, style):
+    from .style import PT_PER_MM
+
+    height = max(height, 1)
+    font = get_font(style["font_family"], style["panel_label_weight"] == "bold")
+    size = style["panel_label_pt"]
+    text_width = font.text_length(label, fontsize=1)
+    text_height = font.ascender - font.descender
+    # A manual label can be longer than its panel. Fit it inside the page with
+    # a small allowance for glyph overhangs and report the resulting print size.
+    inset = min(1.0, width / 8, height / 8)
+    size = min(size, (width - 2*inset) / max(text_width, .01), (height - 2*inset) / text_height)
+    x = max(inset, min(style["label_offset_x_mm"] * PT_PER_MM, width - text_width*size - inset))
+    y = max(inset, min(style["label_offset_y_mm"] * PT_PER_MM, height - text_height*size - inset))
+    return font, size, (x, y, x + text_width*size, y + text_height*size)
+
+
 def name_embedded_fonts(document, page):
     """Use actual PostScript names so editors can match installed font faces."""
     for xref, _, kind, name, *_ in page.get_fonts():

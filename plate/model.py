@@ -1,4 +1,4 @@
-"""Serializable project records. Coordinates are derived from the layout tree."""
+"""Serializable project records."""
 
 from dataclasses import dataclass, field
 import json
@@ -54,6 +54,7 @@ class Project:
     data_root: str = ""
     timeout_s: float = 60
     alignment: list[dict] = field(default_factory=list)
+    groups: list[dict] = field(default_factory=list)
 
 
 def project_from_dict(data):

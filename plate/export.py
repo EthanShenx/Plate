@@ -34,18 +34,15 @@ def placement(page, source, rect):
     if source_page.rotation:
         source_page.remove_rotation()
         full = source_page.rect
-    # Stale plots retain their rendered typography. If necessary, clip the
-    # overflowing edges at the current panel boundary and center the remainder.
-    crop_w, crop_h = min(rect.width, full.width), min(rect.height, full.height)
-    x, y = (full.width - crop_w) / 2, (full.height - crop_h) / 2
-    clip = pdf.Rect(x, y, x + crop_w, y + crop_h)
-    dx, dy = (rect.width - crop_w) / 2, (rect.height - crop_h) / 2
+    # Contain older renders when the panel has shrunk, keeping the plot and labels together.
+    scale = min(1, rect.width / full.width, rect.height / full.height)
+    dx, dy = (rect.width - full.width*scale) / 2, (rect.height - full.height*scale) / 2
     destination = pdf.Rect(rect.x0 + dx, rect.y0 + dy, rect.x1 - dx, rect.y1 - dy)
-    content = page.show_pdf_page(destination, source, 0, clip=clip, keep_proportion=False)
+    content = page.show_pdf_page(destination, source, 0, keep_proportion=False)
     # PDF coordinates pass through single-precision page bounds and an
     # approximate graphics bbox. Ignore sub-millipoint placement roundoff.
     tolerance = 0.002
-    allowed = clip + (-tolerance, -tolerance, tolerance, tolerance)
+    allowed = full + (-tolerance, -tolerance, tolerance, tolerance)
     overflow = any(not allowed.contains(pdf.Rect(entry[1]))
                    for entry in source_page.get_bboxlog())
     return flatten_placement(page.parent, page, content), overflow
@@ -106,14 +103,11 @@ def rasterize(data, width_mm, height_mm, format, dpi):
 
 def append_label(document, page, label, rect, style, form, overflow):
     """Append a label within the panel form's resources and coordinate system."""
-    from .fonts import get_font, name_embedded_fonts, write_text
+    from .fonts import label_metrics, name_embedded_fonts, write_text
 
     kind, value = document.xref_get_key(form, "Matrix")
     a, _, _, d, e, f = [float(n) for n in value.strip("[]").split()] if kind == "array" else (1, 0, 0, 1, 0, 0)
-    font = get_font(style["font_family"], style["panel_label_weight"] == "bold")
-    size = style["panel_label_pt"]
-    offset_x = style["label_offset_x_mm"] * PT_PER_MM
-    offset_y = style["label_offset_y_mm"] * PT_PER_MM
+    font, size, (offset_x, offset_y, _, _) = label_metrics(label, rect.width, rect.height - PT_PER_MM, style)
     top = page.rect.height - rect.y0
     x = (rect.x0 + offset_x - e) / a
     y = (top - offset_y - font.ascender * size - f) / d

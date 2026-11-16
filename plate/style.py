@@ -3,7 +3,7 @@
 import json
 import re
 
-from .model import ROOT
+from .model import ROOT, SCRIPT_EXTENSIONS
 
 HELPERS = ROOT / "helpers"
 DEFAULTS = json.loads((HELPERS / "python/plate/defaults.json").read_text())
@@ -42,14 +42,42 @@ def resolve(project, panel=None):
 
 def content_box(rect, panel, style):
     reservation = style["label_reserve_mm"] if panel.label or not style["collapse_empty_labels"] else 0
+    if panel.label:
+        from .fonts import label_metrics
+
+        _, _, bounds = label_metrics(panel.label, rect["w"] * PT_PER_MM, (rect["h"]-1) * PT_PER_MM, style)
+        reservation = max(reservation, (bounds[3] + 1) / PT_PER_MM)
     if rect["h"] - reservation < 1:
-        raise ValueError("The label reservation leaves less than 1 mm for panel content.")
+        raise ValueError("Increase panel height or reduce the space for labels.")
     return {**rect, "y": rect["y"] + reservation, "h": rect["h"] - reservation}
 
 
 def context_for(project, panel, rect):
     context = resolve(project, panel)
     box = content_box(rect, panel, context["style"])
+    references = panel.settings.get("geometry_refs")
+    if references and panel.type in SCRIPT_EXTENSIONS:
+        from .layout import Layout
+
+        layout = Layout(project)
+        panel_boxes = {}
+        for panel_id in references:
+            if panel_id not in layout.panels:
+                continue
+            other = layout.panels[panel_id]
+            target = content_box(layout.rects[panel_id], other, resolve(project, other)["style"])
+            panel_boxes[panel_id] = {
+                "x": round(target["x"] - box["x"], 8), "y": round(target["y"] - box["y"], 8),
+                "w": round(target["w"], 8), "h": round(target["h"], 8),
+            }
+        context["panel_boxes_mm"] = panel_boxes
+    if panel.type in SCRIPT_EXTENSIONS and context["inject"]:
+        # The workers reapply explicit panel overrides after the script sets its defaults.
+        keys = {key for key in panel.overrides if key in TOKENS}
+        if keys.intersection({"font_main_pt", "font_min_pt"}):
+            keys.update(role for role in ROLE_OFFSETS
+                        if panel.overrides.get(role, project.style.get(role)) is None)
+        context["overrides"] = sorted(keys)
     return {**context, "size_mm": [round(box["w"], 8), round(box["h"], 8)]}
 
 
@@ -87,6 +115,12 @@ def validate_style(project):
         raise ValueError("The selected palette is missing.")
     semantic(project.palettes.get("colors", {}))
     for panel in project.panels:
+        if "geometry_refs" in panel.settings:
+            references = panel.settings["geometry_refs"]
+            if (panel.type not in SCRIPT_EXTENSIONS or not isinstance(references, list) or
+                    any(not isinstance(ref, str) or not ref or ref == panel.id for ref in references) or
+                    len(references) != len(set(references))):
+                raise ValueError("Script geometry references need distinct IDs of other panels.")
         crop = panel.settings.get("crop")
         if crop is not None:
             if len(crop) != 4:

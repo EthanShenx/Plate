@@ -99,7 +99,7 @@ def main():
     tree = split("y", [row1, row2, row3])
     tree["id"], tree["weights"] = "rows", [49, 48, 12]
     project = Project(
-        id="nature-double", name="Nature double · Signal response",
+        id="nature-double", name="Signal response",
         size=FigureSize(width_mm=183, height_mm=123), panels=panels, layout=tree,
         style={"font_family": "Arial", "font_main_pt": 7, "font_min_pt": 5,
                "line_axis_pt": .5, "line_data_pt": .75, "margin_mm": 4, "gutter_mm": 3},

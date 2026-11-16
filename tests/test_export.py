@@ -6,7 +6,8 @@ from PIL import Image
 import pymupdf
 
 from plate.export import compose_pdf, rasterize
-from plate.style import PT_PER_MM
+from plate.model import Panel, Project
+from plate.style import PT_PER_MM, content_box, resolve
 
 
 class Export(unittest.TestCase):
@@ -37,6 +38,24 @@ class Export(unittest.TestCase):
     def test_blank_panel_still_has_form(self):
         with pymupdf.open(stream=compose_pdf(20, 20, [(None, dict(x=1, y=1, w=18, h=18))])) as document:
             self.assertEqual(len(document[0].get_xobjects()), 1)
+
+    def test_narrow_placement_preserves_stale_plot_and_panel_label(self):
+        with pymupdf.open() as document:
+            source = document.new_page(width=120, height=70)
+            source.insert_text((3, 20), "Left axis label", fontsize=8)
+            source.insert_text((85, 50), "Right title", fontsize=7)
+            source = document.tobytes()
+        rect = dict(x=0, y=0, w=18, h=40)
+        panel = Panel(label="Long panel label", overrides={"panel_label_pt": 20})
+        style = resolve(Project(), panel)["style"]
+        box = content_box(rect, panel, style)
+        with pymupdf.open(stream=compose_pdf(18, 40, [(source, box, panel.label, rect, style)])) as document:
+            page = document[0]
+            for label in ("Left axis label", "Right title", panel.label):
+                self.assertIn(label, page.get_text())
+            for kind, bounds in page.get_bboxlog():
+                if kind == "fill-text":
+                    self.assertTrue(page.rect.contains(pymupdf.Rect(bounds)), bounds)
 
     def test_raster_dimensions_and_metadata_at_each_dpi(self):
         width, height = 21.33, 16.29
