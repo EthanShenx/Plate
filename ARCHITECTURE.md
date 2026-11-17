@@ -2,6 +2,8 @@
 
 Plate uses Python for physical geometry, workspace I/O, subprocess management and PDF composition. PyMuPDF provides PDF parsing, vector placement and rasterization. Pillow writes DPI-tagged RGB files and handles image input. FontTools resolves names in the installed font collection. The browser uses ES modules and CodeMirror 6. The app starts with the standard-library HTTP server on a random 127.0.0.1 port.
 
+The macOS app uses a Swift AppKit shell and WKWebView with the same Python server and web files. The shell owns its backend through a pipe that closes on quit, supplies a per-launch loopback credential, and exposes native file pickers to the workspace. Desktop and browser sessions use separate working directories and share the `.plate` format. [Desktop build and testing](docs/macos.md)
+
 ```mermaid
 flowchart LR
   UI[Browser canvas and CodeMirror] <--> HTTP[Loopback HTTP session]

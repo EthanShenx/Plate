@@ -1,3 +1,4 @@
+import { redo, undo } from "@codemirror/commands";
 import { EditorState } from "@codemirror/state";
 import { EditorView, basicSetup } from "codemirror";
 import { python } from "@codemirror/lang-python";
@@ -7,11 +8,11 @@ import { tags } from "@lezer/highlight";
 
 const highlighting = HighlightStyle.define([
   { tag: tags.comment, color: "var(--muted)", fontStyle: "italic" },
-  { tag: [tags.keyword, tags.operatorKeyword], color: "#354c85" },
-  { tag: [tags.string, tags.regexp, tags.special(tags.string)], color: "#236246" },
+  { tag: [tags.keyword, tags.operatorKeyword], color: "var(--code-keyword, #354c85)" },
+  { tag: [tags.string, tags.regexp, tags.special(tags.string)], color: "var(--code-string, #236246)" },
   { tag: [tags.number, tags.bool, tags.null, tags.atom], color: "var(--amber-12)" },
   { tag: [tags.function(tags.variableName), tags.definition(tags.variableName), tags.typeName],
-    color: "#324264" },
+    color: "var(--code-keyword, #324264)" },
   { tag: tags.invalid, color: "var(--red-11)" },
   { tag: tags.escape, color: "var(--red-12)" },
 ]);
@@ -41,6 +42,7 @@ export function createEditor(parent, language, source, onChange) {
       editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: source } });
       replacing = false;
     },
+    history(reverse) { return reverse ? redo(editor) : undo(editor); },
     destroy() { editor.destroy(); },
   };
 }

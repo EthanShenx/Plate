@@ -43,9 +43,14 @@ def candidates(names, paths):
                 yield str(file.absolute())
 
 
+def default_python():
+    path = os.environ.get("PLATE_DEFAULT_PYTHON", "")
+    return path if os.path.isabs(path) and os.access(path, os.X_OK) else sys.executable
+
+
 def discovery(extra=()):
     search = login_path().split(os.pathsep)
-    python = [sys.executable, *candidates(PYTHON_NAMES, search)]
+    python = [default_python(), sys.executable, *candidates(PYTHON_NAMES, search)]
     roots = [Path(item).expanduser() for item in extra]
     for parent in (Path.home() / ".virtualenvs", Path.home() / ".venvs"):
         if parent.is_dir():
@@ -69,7 +74,7 @@ def interpreter(project, panel):
         path = Path(configured).expanduser()
         found = str(path) if path.is_absolute() else shutil.which(str(path), path=login_path())
     elif panel.type == "script-py":
-        found = sys.executable
+        found = default_python()
     else:
         found = next((path for path in candidates(R_NAMES, login_path().split(os.pathsep))
                       if not is_conda_r(path)), None)

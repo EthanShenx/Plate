@@ -442,6 +442,36 @@ dialog::backdrop { background: var(--black-a5); }
 dialog h2 { font-size: var(--heading); margin-bottom: 16px; }
 dialog p { margin-bottom: 12px; }
 .dialog-actions { display: flex; justify-content: end; gap: 8px; margin-top: 16px; }
+.path-picker { display: flex; gap: 6px; align-items: end; }
+.path-picker > .field { flex: 1; min-width: 0; }
+[data-desktop] :is(.toolbar, .stage-bar, .panel-row, .stage, .inspector-tabs) { user-select: none; -webkit-user-select: none; }
+[data-desktop] :is(input, textarea, [contenteditable], pre) { user-select: text; -webkit-user-select: text; }
+[data-desktop][data-appearance="dark"] {
+  color-scheme: dark;
+  --paper: #252528;
+  --surface: #202023;
+  --sidebar: #222226;
+  --canvas: #18181b;
+  --grid-line: #ddd;
+  --ink: #f0eef0;
+  --muted: #aeabb2;
+  --line: #38383d;
+  --control-line: #55515b;
+  --hover: #333237;
+  --active: #403b43;
+  --accent-ink: #ff9acd;
+  --focus: #f0aed0;
+  --amber-3: #3f341a;
+  --amber-11: #ffcf79;
+  --amber-12: #f8e3ba;
+  --red-3: #4a2633;
+  --red-11: #ff9db4;
+  --red-12: #ffd1dd;
+  --code-keyword: #aabfff;
+  --code-string: #91d4b3;
+}
+[data-desktop][data-appearance="dark"] #frame { background: white; }
+[data-desktop][data-appearance="dark"] .primary { color: #252025; }
 #export-issues, #environment-report {
   max-height: min(50vh, 340px);
   overflow: auto;

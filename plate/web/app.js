@@ -1,4 +1,6 @@
 const $ = selector => document.querySelector(selector);
+const desktop = window.webkit?.messageHandlers?.plate;
+const HISTORY_LIMIT = 50;
 const { createEditor } = await import("/vendor/editor.js").catch(() => ({
   createEditor(parent, language, source, onChange) {
     const input = document.createElement("textarea");
@@ -33,6 +35,9 @@ let busy = false;
 let pendingChange;
 let automaticRefresh;
 let refreshTimer;
+let pollTimer;
+let polling = false;
+let desktopVisible = true;
 let showChecks = false;
 let dragged = null;
 let draggedType = null;
@@ -107,6 +112,7 @@ async function commit(path, body, remember = true) {
     state = await request(path, body);
     if (remember && JSON.stringify(before) !== JSON.stringify(state.project)) {
       past.push(before);
+      if (past.length > HISTORY_LIMIT) past.shift();
       future = [];
     }
     draw();
@@ -802,8 +808,9 @@ function stringField(caption, value, onChange) {
 
 function scheduleRefresh() {
   clearTimeout(refreshTimer);
-  if (!stalePanels().length) return;
+  if (!workspaceVisible() || !stalePanels().length) return;
   refreshTimer = setTimeout(() => {
+    if (!workspaceVisible()) return;
     if (busy || panelGesture || dragged || draggedType) {
       scheduleRefresh();
       return;
@@ -1125,7 +1132,13 @@ function nativeInspector(panel) {
   const dpi = render.metadata?.effective_dpi?.[0];
   asset.textContent = dpi && settings.filename ? `${settings.filename} (${Math.round(dpi)} dpi)` : settings.filename || "";
   const vector = panel.type === "vector";
-  const controls = [button(settings.filename ? "Replace file…" : "Import file…", () => {
+  const controls = [button(settings.filename ? "Replace file…" : "Import file…", async () => {
+    if (desktop) {
+      const path = await chooseDesktopPath(vector ? "openVector" : "openRaster");
+      if (automaticRefresh) await automaticRefresh;
+      if (path) await commit("/api/asset", { panel: panel.id, path });
+      return;
+    }
     askValue(vector ? "Import vector" : "Import image", vector ? "PDF or SVG path" : "Image path", "Import",
       path => commit("/api/asset", { panel: panel.id, path }));
   })];
@@ -1396,6 +1409,26 @@ function activeScript() {
   return state.project.panels.find(panel => panel.id === selected && isScript(panel));
 }
 
+function workspaceVisible() {
+  return desktopVisible && !document.hidden;
+}
+
+function queuePoll(delay = 1000) {
+  clearTimeout(pollTimer);
+  if (!state || polling || !workspaceVisible()) return;
+  pollTimer = setTimeout(async () => {
+    if (!workspaceVisible()) return;
+    polling = true;
+    try { await pollScripts(); }
+    finally { polling = false; queuePoll(); }
+  }, delay);
+}
+
+function resumeVisibleWork() {
+  queuePoll(0);
+  if (state) scheduleRefresh();
+}
+
 async function runSelected(force = false) {
   if (automaticRefresh) await automaticRefresh;
   if (pendingChange && !await pendingChange) return;
@@ -1621,13 +1654,14 @@ function draw(updateStatus = true) {
   const height = document.createElement("input");
   Object.assign(height, { type: "number", min: "1", step: "0.1", value: project.size.height_mm });
   height.onchange = () => change(p => { if (height.validity.valid) p.size.height_mm = height.valueAsNumber; });
+  const localData = stringField("Local data folder", state.data_root_override, async value => {
+    if (pendingChange && !await pendingChange) return;
+    if (automaticRefresh) await automaticRefresh;
+    await commit("/api/local-data-folder", { path: value.trim() }, false);
+  });
   const projectOptions = [
     stringField("Data folder", project.data_root, value => change(p => { p.data_root = value; })),
-    stringField("Local data folder", state.data_root_override, async value => {
-      if (pendingChange && !await pendingChange) return;
-      if (automaticRefresh) await automaticRefresh;
-      await commit("/api/local-data-folder", { path: value.trim() }, false);
-    }),
+    desktop ? pathPicker(localData, "chooseFolder") : localData,
     button("Compare render environment", showEnvironmentReport),
     numeric("Render timeout (s)", project.timeout_s, value => change(p => { p.timeout_s = value; }), 1),
     ...["script-r", "script-py"].map(type =>
@@ -1640,7 +1674,14 @@ function draw(updateStatus = true) {
     }),
     button("Detect interpreters", findInterpreters),
     button("Export style (.json)", async () => {
-      try { downloadJson("plate-style.json", await request("/api/style-json", {})); }
+      try {
+        if (desktop) {
+          const path = await chooseDesktopPath("saveStyle", "plate-style.json");
+          if (path) report((await request("/api/save-style", {path})).path);
+        } else {
+          downloadJson("plate-style.json", await request("/api/style-json", {}));
+        }
+      }
       catch (error) { report(error.message); }
     }),
   ];
@@ -1779,6 +1820,25 @@ function askValue(title, label, submitLabel, onSubmit) {
   inputDialog.showModal();
 }
 $("#cancel-input").onclick = () => inputDialog.close();
+
+async function chooseDesktopPath(kind, suggested = "") {
+  try { return await desktop.postMessage({ kind, suggested }); }
+  catch (error) { report(error.message); return null; }
+}
+
+function pathPicker(label, kind) {
+  const row = document.createElement("div");
+  row.className = "path-picker";
+  const input = label.querySelector("input");
+  row.append(label, button("Choose…", async () => {
+    const path = await chooseDesktopPath(kind);
+    if (path) {
+      input.value = path;
+      input.dispatchEvent(new Event("change"));
+    }
+  }));
+  return row;
+}
 
 async function addPanel(type, position) {
   const name = `${typeNames[type]} panel`;
@@ -2057,6 +2117,13 @@ $("#export-warnings").onclick = () => {
   $("#show-checks").focus();
 };
 $("#cancel-export").onclick = () => exportDialog.close();
+$("#browse-export").onclick = async () => {
+  const extension = $("#export-format").value;
+  const kind = { pdf: "exportPDF", png: "exportPNG", tiff: "exportTIFF" }[extension];
+  const input = $("#export-path");
+  const path = await chooseDesktopPath(kind, input.value || state.project.name + "." + extension);
+  if (path) input.value = path;
+};
 $("#export-form").onsubmit = async event => {
   event.preventDefault();
   const submit = event.submitter;
@@ -2186,8 +2253,13 @@ function newProject() {
   if (state && (!busy || automaticRefresh || pendingChange) && canSwitchProject()) action("new");
 }
 
-function openProject() {
+async function openProject() {
   if (!state || busy && !automaticRefresh && !pendingChange) return;
+  if (desktop) {
+    const path = await chooseDesktopPath("openProject");
+    if (path && canSwitchProject()) await action("open", { path });
+    return;
+  }
   askValue("Open project", "Path to a .plate file", "Open",
     path => canSwitchProject() ? action("open", { path }) : undefined);
 }
@@ -2221,6 +2293,11 @@ $("#save").onclick = async () => {
   if (await saveAllDrafts()) await action("save", { cache: Boolean(state.keep_cache) });
 };
 $("#cancel-save").onclick = () => saveDialog.close();
+$("#browse-bundle").onclick = async () => {
+  const input = $("#bundle-path");
+  const path = await chooseDesktopPath("saveProject", input.value || state.project.name + ".plate");
+  if (path) input.value = path;
+};
 $("#save-form").onsubmit = async event => {
   event.preventDefault();
   const submit = event.submitter;
@@ -2249,7 +2326,50 @@ window.addEventListener("beforeunload", event => {
   event.preventDefault();
   event.returnValue = "";
 });
+document.addEventListener("visibilitychange", resumeVisibleWork);
+window.addEventListener("pageshow", resumeVisibleWork);
+window.addEventListener("pagehide", () => {
+  clearTimeout(pollTimer);
+  clearTimeout(refreshTimer);
+});
 $("#project-name").onchange = event => change(p => { p.name = event.target.value.trim() || "Untitled figure"; });
+
+if (desktop) {
+  document.documentElement.dataset.desktop = "";
+  $("#browse-bundle").hidden = $("#browse-export").hidden = false;
+  document.addEventListener("contextmenu", event => {
+    if (!event.target.closest("input, textarea, [contenteditable], pre") && !String(getSelection())) {
+      event.preventDefault();
+    }
+  });
+  window.plateDesktopCommand = async (name, value) => {
+    if (!state) return name === "prepareQuit";
+    if (name === "visibility") {
+      desktopVisible = value;
+      resumeVisibleWork();
+    } else if (name === "appearance") {
+      document.documentElement.dataset.appearance = value;
+    } else if (name === "prepareQuit") {
+      return !hasUnsavedScriptEdits() || await saveAllDrafts();
+    } else if (name === "openPath") {
+      return typeof value === "string" && canSwitchProject() && await action("open", { path: value });
+    } else if (name === "undo" || name === "redo") {
+      const input = document.activeElement;
+      if ($("#script-editor").contains(input) && editor?.history) editor.history(name === "redo");
+      else if (input.matches("input, textarea, [contenteditable]")) document.execCommand(name);
+      else $("#" + name).click();
+    } else if (name === "new" || name === "open") {
+      if (!$("dialog[open]")) $("#" + name).click();
+    } else if (hasEditorProject) {
+      const target = { save: "#save", saveAs: "#save-as", export: "#export", refresh: "#refresh-all" }[name];
+      if (target && !$("dialog[open]")) {
+        if ($("#workspace").hidden) showEditor();
+        $(target).click();
+      }
+    }
+    return true;
+  };
+}
 
 try {
   [state, journals] = await Promise.all([request("/api/project"), request("/api/presets")]);
@@ -2259,5 +2379,6 @@ try {
   draw();
   scheduleRefresh();
   findInterpreters();
-  setInterval(pollScripts, 1000);
+  queuePoll();
+  if (desktop) await desktop.postMessage({ kind: "ready" });
 } catch (error) { report(error.message); }

@@ -14,7 +14,8 @@ import shutil
 import signal
 from stat import S_ISREG
 import subprocess
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, TemporaryFile
+from threading import Lock
 from time import monotonic
 from uuid import uuid4
 
@@ -29,6 +30,10 @@ ABSOLUTE_PATH = re.compile(r"""['"](?:/(?!/)|[A-Za-z]:[\\/]|~/)""")
 ENGINE_VERSION = 5
 PREVIEW_DPI = (130, 260, 520, 1040)
 MAX_PREVIEW_PIXELS = 12_000_000
+PLOT_LOCK = Lock()
+ACTIVE_PLOTS = set()
+STOPPING_PLOTS = False
+LOG_TAIL_BYTES = 64 * 1024
 
 
 def signature(project, panel, rect, context=None, path=None, version=None):
@@ -147,20 +152,47 @@ class RenderError(ValueError):
         self.stderr = stderr
 
 
+def kill_plot(process):
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def stop_plot_processes():
+    global STOPPING_PLOTS
+    with PLOT_LOCK:
+        STOPPING_PLOTS = True
+        for process in ACTIVE_PLOTS:
+            kill_plot(process)
+
+
+def log_tail(stream):
+    size = stream.tell()
+    stream.seek(max(0, size - LOG_TAIL_BYTES))
+    text = stream.read().decode(errors="replace")
+    return f"[Earlier output omitted]\n{text}" if size > LOG_TAIL_BYTES else text
+
+
 def plot_process(command, cwd, env, timeout):
-    with subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, start_new_session=True) as process:
+    with TemporaryFile() as stdout, TemporaryFile() as stderr:
+        with PLOT_LOCK:
+            if STOPPING_PLOTS:
+                raise RenderError("Plate is closing.")
+            process = subprocess.Popen(command, cwd=cwd, env=env, stdout=stdout,
+                                       stderr=stderr, start_new_session=True)
+            ACTIVE_PLOTS.add(process)
         try:
-            output, errors = process.communicate(timeout=timeout)
+            status = process.wait(timeout=timeout)
+            return status, log_tail(stdout), log_tail(stderr)
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            output, errors = process.communicate()
+            kill_plot(process)
+            process.wait()
             raise RenderError(f"Render timed out after {timeout:g} seconds.",
-                              output.decode(errors="replace"), errors.decode(errors="replace")) from None
-        return process.returncode, output.decode(errors="replace"), errors.decode(errors="replace")
+                              log_tail(stdout), log_tail(stderr)) from None
+        finally:
+            with PLOT_LOCK:
+                ACTIVE_PLOTS.discard(process)
 
 
 def data_directory(project, workspace, bundle, override=None):

@@ -4,6 +4,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 from dataclasses import asdict, replace
 from hashlib import sha256
+from hmac import compare_digest
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
@@ -42,6 +44,9 @@ WORKSPACES = Path.home() / "Library/Application Support/Plate/workspaces"
 RENDER_ERRORS = (ValueError, OSError, RuntimeError, subprocess.SubprocessError)
 MAX_RENDER_WORKERS = 3
 PREVIEW_LOCK = Lock()
+DESKTOP_CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+               "img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; "
+               "form-action 'self'; frame-ancestors 'none'; frame-src 'none'")
 
 
 def workspace_record(workspace):
@@ -383,6 +388,7 @@ class Session:
                              lambda tmp: tmp.write_text(panel.script, encoding="utf-8"))
         write_workspace(project, self.workspace, write_scripts=write_scripts)
         self.project = project
+        self.renders = {panel.id: self.renders[panel.id] for panel in project.panels if panel.id in self.renders}
 
     def save(self, path=None, *, cache=False):
         path = Path(path).expanduser() if path else self.bundle
@@ -520,9 +526,13 @@ class Session:
             panel = next(item for item in self.project.panels if item.id == panel.id)
             self.refresh_panel(panel, Layout(self.project).rects[panel.id])
             return self.state()
-        if endpoint == "/api/style-json":
+        if endpoint in {"/api/style-json", "/api/save-style"}:
             result = resolve(self.project)
             result["size_mm"] = [self.project.size.width_mm, self.project.size.height_mm]
+            if endpoint == "/api/save-style":
+                path = Path(data["path"]).expanduser().with_suffix(".json")
+                write_json(path, result)
+                return {"path": str(path.resolve())}
             return result
         if endpoint == "/api/export":
             return self.export(data)
@@ -613,6 +623,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        if self.server.desktop_token:
+            self.send_header("Content-Security-Policy", DESKTOP_CSP)
         self.end_headers()
         self.wfile.write(data)
 
@@ -623,6 +635,15 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("Host") != self.address():
             self.send_error(403)
             return False
+        if self.server.desktop_token:
+            try:
+                cookie = SimpleCookie(self.headers.get("Cookie", "")).get("plate_desktop")
+                authorized = cookie and compare_digest(cookie.value.encode(), self.server.desktop_token)
+            except CookieError:
+                authorized = False
+            if not authorized:
+                self.send_error(403)
+                return False
         return True
 
     def do_GET(self):
@@ -670,7 +691,9 @@ class Handler(BaseHTTPRequestHandler):
                 })
         elif path == "/api/project":
             with self.server.session.lock:
-                self.json(self.server.session.state())
+                session = self.server.session
+                sync_scripts(session.project, session.workspace)
+                self.json(session.state())
         elif path == "/api/projects":
             self.json(project_library(self.server.session.workspaces))
         elif path == "/api/presets":
@@ -715,10 +738,25 @@ class PlateServer(ThreadingHTTPServer):
         super().server_close()
 
 
-def make_server(bundle=None, workspaces=WORKSPACES):
+def make_server(bundle=None, workspaces=WORKSPACES, *, desktop_token=""):
     server = PlateServer(("127.0.0.1", 0), Handler)
-    server.session = Session(bundle, workspaces)
-    server.session.initialize_native_panels()
-    server.watcher = Watcher(server.session)
-    server.watcher.start()
+    server.desktop_token = desktop_token.encode()
+    try:
+        if desktop_token and not bundle:
+            workspaces.mkdir(parents=True, exist_ok=True)
+            for record in project_library(workspaces):
+                try:
+                    server.session = Session(workspaces=workspaces, workspace=workspaces / record["id"])
+                    break
+                except (ValueError, KeyError, TypeError, OSError):
+                    logging.getLogger("plate").info("Could not resume workspace %s", record["id"])
+        if not hasattr(server, "session"):
+            server.session = Session(bundle, workspaces)
+        server.session.initialize_native_panels()
+        if not desktop_token:
+            server.watcher = Watcher(server.session)
+            server.watcher.start()
+    except Exception:
+        server.server_close()
+        raise
     return server

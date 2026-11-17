@@ -1,10 +1,13 @@
 from argparse import ArgumentParser
 import logging
+import os
 from pathlib import Path
 import sys
+from threading import Thread
 import webbrowser
 
 from . import cli
+from .render import stop_plot_processes
 from .server import WORKSPACES, make_server
 
 
@@ -17,9 +20,13 @@ def main():
     )
     parser.add_argument("bundle", nargs="?")
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--desktop", action="store_true", help="Start the private macOS app backend.")
     parser.add_argument("--workspaces", type=Path, default=WORKSPACES, help="Override the workspace directory.")
     options = parser.parse_args()
-    with make_server(options.bundle, options.workspaces.expanduser().resolve()) as server:
+    token = os.environ.pop("PLATE_DESKTOP_TOKEN", "") if options.desktop else ""
+    if options.desktop and not token:
+        parser.error("Start desktop mode from Plate.app.")
+    with make_server(options.bundle, options.workspaces.expanduser().resolve(), desktop_token=token) as server:
         class WorkspaceLog(logging.Handler):
             def emit(self, record):
                 try:
@@ -31,7 +38,13 @@ def main():
         logging.basicConfig(level=logging.INFO, handlers=[WorkspaceLog()])
         url = f"http://127.0.0.1:{server.server_port}"
         print(f"Plate is running at {url}", flush=True)
-        if not options.no_browser:
+        if options.desktop:
+            def stop_when_app_closes():
+                sys.stdin.buffer.read()
+                stop_plot_processes()
+                server.shutdown()
+            Thread(target=stop_when_app_closes, name="Plate app lifetime", daemon=True).start()
+        elif not options.no_browser:
             webbrowser.open(url)
         try:
             server.serve_forever()

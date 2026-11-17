@@ -1,46 +1,67 @@
 # Plate
 
-Plate is a local macOS workbench for assembling publication figures from R and Python scripts, images, imported vectors, text and legends. Each plot renders at its final physical size. Panels sit independently on a shared artboard.
+**Build publication figures from the code that made them.**
 
-## Start on macOS 13 or later
+Put R and Python plots, images, and legends on one canvas. Resize a panel and Plate redraws the plot at its final print size. Change a group colour once and every plot using it updates. When the figure is ready, export an editable PDF with selectable text or a high-resolution TIFF or PNG.
 
-Install Python 3.10 or later, Node.js 20 or later, and the macOS command-line tools. Install R from [CRAN](https://cran.r-project.org/bin/macosx/) if you use R panels. The default Python for plots is the app's repository-local environment. You can select another Python, virtualenv or conda environment from the inspector. Plate uses the framework or Homebrew R installation.
+[Install Plate](#install) · [Make your first figure](#make-your-first-figure)
+
+## Watch Plate in action
+
+See how to build three panels from code, change a colour across the figure, and make room for a panel before exporting.
+
+https://github.com/user-attachments/assets/6be71697-e6bc-4618-8e06-54d2d3d3ff21
+
+## Install
+
+Build Plate on your Mac. You’ll need [Python 3.10 or later](https://www.python.org/downloads/macos/), [Node.js 20 or later](https://nodejs.org/en/download), and Apple’s command-line tools (`xcode-select --install`). Install [R](https://cran.r-project.org/bin/macosx/) if you use R plots or want to try the sample figure.
 
 ```sh
-make run
+git clone https://github.com/EthanShenx/Plate.git
+cd Plate
 ```
 
-The command installs the app dependencies in this checkout, builds CodeMirror and opens the workspace in your browser. To open it in another tab, use the `http://127.0.0.1:…` address printed in Terminal. Keep the command running while you use Plate. Run scripts and open bundles from sources you trust, since the interpreters run with your permissions.
+### Mac app
 
-For the default environment and the sample project, install the plotting packages once.
+Requires macOS 14 or later. Build it once, then open **Plate** from your Applications folder or Spotlight. Quit Plate before rebuilding it after an update.
+
+```sh
+make macos MAC_APP="$HOME/Applications/Plate.app"
+open "$HOME/Applications/Plate.app"
+```
+
+### Browser
+
+On macOS 13 or later, run `make run`. Keep Terminal open while you work. The Mac app and browser use the same `.plate` format and keep separate draft libraries.
+
+### Plotting packages
+
+If you already have a plotting environment, select its interpreter in Plate. For the sample below, install these packages once after building or starting Plate.
 
 ```sh
 .venv/bin/python -m pip install matplotlib seaborn
 Rscript -e 'install.packages(c("ggplot2", "jsonlite", "systemfonts", "patchwork"), repos="https://cloud.r-project.org")'
 ```
 
-Use `brew install librsvg` if you plan to import SVG. If **Dependencies** reports a missing Cairo PDF device in CRAN R, install [XQuartz](https://www.xquartz.org/) with `brew install --cask xquartz`. You can check an individual interpreter and copy the relevant package command from the **Dependencies** button. Plot packages are installed by the user.
+## Make your first figure
 
-## Five-minute tutorial
+Open [`examples/nature-double.plate`](examples/nature-double.plate) with **File → Open**. In the browser version, run `make run BUNDLE=examples/nature-double.plate`. The sample mixes R and Python plots with a synthetic microscopy image and a shared legend.
 
-1. Run `make run BUNDLE=examples/nature-double.plate`. The 183 × 123 mm project contains four plot scripts, a synthetic microscopy image and a shared legend. Plate renders any out-of-date panels automatically.
-2. Drag a panel to move it. Drag any corner to resize it against the opposite corner. Both gestures snap to the artboard grid, which defaults to 2 mm. Change **Grid spacing (mm)** in Figure settings. To enter exact positions or sizes, use the panel’s **Geometry** section. Adjust stacking under **Arrange**.
-3. Open **Figure settings** to change a font role, stroke or group colour. Select a panel to edit its label or change its style settings. Previous previews stay visible while Plate renders the changes.
-4. Select a script panel and choose **Edit script**. **Run** saves and renders it. Choose **More → Show script in Finder** to locate the live workspace file. Changes saved in an external editor reload into CodeMirror. Use **Checks** to locate print-size warnings.
-5. Choose **File → Save as…** to save a separate `.plate` bundle and optionally include previews. **Save** writes subsequent changes to that bundle. Choose **Export** for an editable PDF or an RGB TIFF/PNG at 300, 600 or 1200 dpi.
+1. **Arrange the panels.** Drag a panel to move it or drag a corner to resize it. Use **Geometry** to enter exact dimensions in millimetres.
+2. **Set the figure style.** Pick a journal width and set fonts, strokes, and group colours in **Figure settings**.
+3. **Revise a plot.** Select a script panel, choose **Edit script**, then click **Run**. List its data files and helpers under **Source → Render inputs** so Plate refreshes the plot when they change.
+4. **Check and export.** Open **Checks** to review small text, low-resolution images, and other print warnings. Save your work as a `.plate` file, then export an editable PDF or a TIFF or PNG at 300, 600, or 1200 dpi.
 
-In a script panel’s **Source → Render inputs**, list the data files and helper scripts it reads. Plate refreshes the panel when a listed file changes. Use **Edit script → More → Force render** for a database query or another input outside that list. Export refreshes pending panels and requires current artwork for every panel. If any panel is incomplete, the dialog lists what a draft would reuse or omit and lets you explicitly choose **Export draft**.
+To start from scratch, choose **New project** and **Add panel**. You can mix R and Python scripts with images, PDF or SVG artwork, text, and legends.
 
-Pinch over the canvas to zoom. **Fit** fits the figure to the workspace and **100%** resets the display scale. **⌘ Enter** refreshes the selected panel and **⌘ Shift Enter** refreshes all out-of-date panels. **⌘ Z** and **⌘ Shift Z** undo and redo figure changes. CodeMirror has its own text history.
+## Share a figure
 
-Drag from empty canvas space to select several panels, or Shift-click panels to add or remove them. Drag a selected panel to move the selection, or drag a selection corner to scale it. In **Selection geometry**, use **Set panel sizes** to give each panel the same width or height. Press **Esc** to clear the selection.
+A `.plate` file carries the layout, styles, scripts, and imported artwork. Share external data separately and set **Local data folder** when it lives somewhere different on another Mac. Use **Compare render environment** to check the interpreter, package, and font details saved with the figure.
 
-A `.plate` file contains layout, styles, scripts and imported figure assets. Data files loaded by scripts stay in their original locations. Set **Advanced → Data folder** or place your data relative to the bundle directory. Use **File → Show workspace in Finder** to inspect extracted project files and logs. The script contract covers plotting, styling and running the helpers outside Plate.
+Plate runs locally and opens plotting scripts with your permissions. Use scripts and bundles from sources you trust.
 
-Saved bundles also record interpreter and loaded package versions and the fonts found in successful renders, even when previews are excluded. In **Figure settings → Advanced**, choose **Compare render environment** to check that record against local installations. Set **Local data folder** to use a different data location for this workspace. Clear it to use the bundle’s data folder again. The local path stays with the workspace.
+## More help
 
-Run the local test suite with `make test` after installing the plotting prerequisites. The render tests report missing interpreters or plotting packages as skips. See the [script contract](docs/script-contract.md), [architecture](ARCHITECTURE.md) and [export acceptance checklist](docs/ACCEPTANCE.md).
-
-## Command-line authoring
-
-Use `.venv/bin/python -m plate build`, `inspect`, `apply` and `export` to assemble and revise figures from scripts and JSON. The commands return JSON geometry and print checks that an agent can use to make the next edit. [Command reference and specification example](docs/cli.md)
+- [macOS build and troubleshooting](docs/macos.md)
+- [Writing R and Python panels](docs/script-contract.md)
+- [Building and exporting figures from the command line](docs/cli.md)

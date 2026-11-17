@@ -7,9 +7,7 @@
   <title>Plate</title>
   <link rel="icon" href="./plate-mark.svg" type="image/svg+xml">
   <link rel="stylesheet" href="./plate.css">
-  <script>
-    if (location.protocol === "file:") document.documentElement.classList.add("file-launch");
-  </script>
+  <script defer src="./launch.js"></script>
 </head>
 <body>
 <main id="launch-help">
@@ -148,7 +146,10 @@
 <dialog id="save-dialog" aria-labelledby="save-title">
   <form id="save-form">
     <h2 id="save-title">Save project</h2>
-    <label class="field">Project path<input id="bundle-path" name="project-path" required placeholder="/path/to/figure.plate" autocomplete="off" spellcheck="false"></label>
+    <div class="path-picker">
+      <label class="field">Project path<input id="bundle-path" name="project-path" required placeholder="/path/to/figure.plate" autocomplete="off" spellcheck="false"></label>
+      <button id="browse-bundle" type="button" hidden>Choose…</button>
+    </div>
     <label class="field checkbox"><input id="bundle-cache" name="include-previews" type="checkbox">Include rendered previews</label>
     <p id="save-error" class="form-error" role="status" hidden></p>
     <div class="dialog-actions"><button type="button" id="cancel-save">Cancel</button><button type="submit" class="primary">Save</button></div>
@@ -161,7 +162,10 @@
       <label class="field">Format<select id="export-format" name="format"><option value="pdf">Editable PDF</option><option value="png">PNG</option><option value="tiff">TIFF</option></select></label>
       <label class="field" id="dpi-field">Resolution (dpi)<select id="export-dpi" name="resolution"><option>300</option><option>600</option><option>1200</option></select></label>
     </div>
-    <label class="field">Save to<input id="export-path" name="export-path" required placeholder="/path/to/figure.pdf" autocomplete="off" spellcheck="false"></label>
+    <div class="path-picker">
+      <label class="field">Save to<input id="export-path" name="export-path" required placeholder="/path/to/figure.pdf" autocomplete="off" spellcheck="false"></label>
+      <button id="browse-export" type="button" hidden>Choose…</button>
+    </div>
     <button id="export-warnings" class="warning-link" type="button" hidden></button>
     <div id="export-incomplete" hidden>
       <p>These panels need attention before a complete export.</p>
@@ -179,8 +183,5 @@
     <div class="dialog-actions"><button type="submit" class="primary">Done</button></div>
   </form>
 </dialog>
-<script type="module">
-  if (location.protocol !== "file:") import("./app.js");
-</script>
 </body>
 </html>

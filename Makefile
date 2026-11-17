@@ -1,8 +1,9 @@
 PYTHON ?= python3
 APP_PYTHON ?= .venv/bin/python
 BUNDLE ?=
+MAC_APP ?= output/Plate.app
 
-.PHONY: run dev setup editor test
+.PHONY: run dev setup editor test macos test-macos
 run dev: setup
 	$(APP_PYTHON) -m plate $(if $(BUNDLE),"$(BUNDLE)")
 
@@ -25,3 +26,9 @@ plate/web/vendor/.plate-build: plate/web/editor.js plate/web/projects.jsx $(wild
 
 test:
 	$(APP_PYTHON) -m unittest discover -s tests -v
+
+macos: setup
+	$(APP_PYTHON) desktop/build.py --output "$(MAC_APP)"
+
+test-macos: setup
+	$(APP_PYTHON) desktop/test.py
