@@ -46,7 +46,8 @@ class Panel:
 class Project:
     id: str = field(default_factory=new_id)
     name: str = "Untitled figure"
-    size: FigureSize = field(default_factory=FigureSize)
+    size: FigureSize = field(default_factory=lambda: FigureSize(
+        preset_id="custom", width_mm=122, height_mm=183))
     style: dict = field(default_factory=lambda: {"margin_mm": 4, "gutter_mm": 3})
     palettes: dict = field(default_factory=dict)
     panels: list[Panel] = field(default_factory=list)

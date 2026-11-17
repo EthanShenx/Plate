@@ -68,6 +68,46 @@ extension PlateApp {
         print("Private loopback session verified")
         fflush(stdout)
 
+        _ = try await js("document.querySelector('#home-new').click()")
+        try await waitFor("the new project artboard") {
+            try await js("""
+                const empty = document.querySelector("#empty-canvas");
+                const card = empty.getBoundingClientRect();
+                const frame = document.querySelector("#frame").getBoundingClientRect();
+                const button = document.querySelector("#empty-add").getBoundingClientRect();
+                return document.querySelector("#measure").textContent === "122 × 183 mm" &&
+                    frame.height > frame.width && card.height > 0 && card.height < 150 &&
+                    button.height >= 30 && button.height < 48 &&
+                    Math.abs(card.left + card.width / 2 - frame.left - frame.width / 2) < 1 &&
+                    Math.abs(card.top + card.height / 2 - frame.top - frame.height / 2) < 1;
+                """) as? Bool == true
+        }
+        _ = try await js("document.querySelector('#empty-add').click()")
+        try await waitFor("the Add panel menu") {
+            try await js("return document.querySelector('#panel-types').matches(':popover-open')") as? Bool == true
+        }
+        _ = try await js("""
+            [...document.querySelectorAll("#panel-types button")]
+                .find(button => button.textContent === "Text").click();
+            """)
+        try await waitFor("the first panel to replace the empty state") {
+            try await js("return document.querySelector('#empty-canvas').hidden && !!document.querySelector('#frame .tile')") as? Bool == true
+        }
+        _ = try await js("""
+            document.querySelector("#figure-settings").click();
+            document.querySelector('[name="swap-artboard-dimensions"]').click();
+            """)
+        try await waitFor("the landscape artboard") {
+            try await js("""
+                const frame = document.querySelector("#frame").getBoundingClientRect();
+                return document.querySelector("#measure").textContent === "183 × 122 mm" && frame.width > frame.height;
+                """) as? Bool == true
+        }
+        _ = try await js("document.querySelector('#undo').click()")
+        try await waitFor("undo to restore the portrait artboard") {
+            try await js("return document.querySelector('#measure').textContent === '122 × 183 mm'") as? Bool == true
+        }
+
         try menu("File", "Open…")
         try await waitFor("the native Open panel") { window.attachedSheet is NSOpenPanel }
         (window.attachedSheet as? NSOpenPanel)?.cancel(nil)

@@ -38,7 +38,8 @@ class NativePanels(unittest.TestCase):
             result = session.export({"path": str(root / "export.pdf"), "format": "pdf"})
             with pymupdf.open(result["path"]) as exported:
                 page = exported[0]
-                self.assertAlmostEqual(page.rect.width / PT_PER_MM, 183, delta=.01)
+                self.assertAlmostEqual(page.rect.width / PT_PER_MM, 122, delta=.01)
+                self.assertAlmostEqual(page.rect.height / PT_PER_MM, 183, delta=.01)
                 self.assertEqual(len(page.get_xobjects()), 4)
                 self.assertTrue(all(item[2] == 0 for item in page.get_xobjects()))
                 forms = [exported.xref_stream(item[0]) for item in page.get_xobjects()]

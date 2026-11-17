@@ -7,7 +7,7 @@ import pymupdf
 from plate.bundle import save_bundle
 from plate.grid import apply_grid
 from plate.layout import Layout, leaf, split
-from plate.model import Panel, Project
+from plate.model import FigureSize, Panel, Project
 from plate.server import Session
 from plate.style import context_for
 
@@ -51,7 +51,8 @@ class GridLayout(unittest.TestCase):
             "c": dict(x=104, y=4, w=65, h=69), "d": dict(x=4, y=52, w=90, h=52),
             "e": dict(x=8, y=54, w=22, h=20), "f": dict(x=104, y=82, w=65, h=22),
         }
-        project = Project(panels=panels, layout={"mode": "grid", "rects": rects})
+        project = Project(size=FigureSize(width_mm=183, height_mm=122),
+                          panels=panels, layout={"mode": "grid", "rects": rects})
         stacked = apply_grid(project, {"kind": "stack", "panel": "e", "direction": "back"})
         self.assertEqual(Layout(stacked).rects, rects)
         self.assertEqual(stacked.panels[0].id, "e")

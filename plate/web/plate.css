@@ -273,13 +273,15 @@ button.panel-row:has(> .icon) { justify-content: start; gap: 8px; }
   position: absolute; inset: 0; display: grid; place-items: center; padding: 8px;
   overflow: hidden; overflow-wrap: anywhere; color: var(--muted); text-align: center; pointer-events: none;
 }
-.empty {
-  position: absolute; inset: 0; margin: auto; width: max-content; height: max-content; max-width: 92%;
-  display: grid; justify-items: center; gap: 7px; text-align: center; padding: 10px 12px;
-  background: var(--paper); color: var(--muted);
+#empty-canvas {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: max-content; max-width: calc(100% - 16px);
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  padding: 14px 16px; text-align: center; cursor: default;
+  border: 1px solid var(--line); border-radius: var(--dialog-radius);
+  background: var(--surface); color: var(--muted);
 }
-.empty > .icon { width: 25px; height: 25px; color: var(--muted); }
-.empty > button { margin-top: 3px; color: var(--ink); }
+#empty-canvas > .icon { width: 22px; height: 22px; }
 .height-guide { position: absolute; inset-inline: 0; border-top: 1px dashed var(--amber-11); color: var(--amber-12); text-align: end; pointer-events: none; }
 .height-guide.outside { border-top: 0; margin-top: 4px; }
 #panel-handles { position: absolute; pointer-events: none; z-index: calc(var(--active-panel-order) + 1); }

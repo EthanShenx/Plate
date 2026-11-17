@@ -48,7 +48,7 @@ Rscript -e 'install.packages(c("ggplot2", "jsonlite", "systemfonts", "patchwork"
 Open [`examples/nature-double.plate`](examples/nature-double.plate) with **File → Open**. In the browser version, run `make run BUNDLE=examples/nature-double.plate`. The sample mixes R and Python plots with a synthetic microscopy image and a shared legend.
 
 1. **Arrange the panels.** Drag a panel to move it or drag a corner to resize it. Use **Geometry** to enter exact dimensions in millimetres.
-2. **Set the figure style.** Pick a journal width and set fonts, strokes, and group colours in **Figure settings**.
+2. **Set the figure style.** New artboards start in portrait at 122 × 183 mm. Choose **Swap width and height** under **Figure settings → Artboard** to switch orientation. Pick a journal width and set fonts, strokes, and group colours in **Figure settings**.
 3. **Revise a plot.** Select a script panel, choose **Edit script**, then click **Run**. List its data files and helpers under **Source → Render inputs** so Plate refreshes the plot when they change.
 4. **Check and export.** Open **Checks** to review small text, low-resolution images, and other print warnings. Save your work as a `.plate` file, then export an editable PDF or a TIFF or PNG at 300, 600, or 1200 dpi.
 

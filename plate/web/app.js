@@ -1654,6 +1654,14 @@ function draw(updateStatus = true) {
   const height = document.createElement("input");
   Object.assign(height, { type: "number", min: "1", step: "0.1", value: project.size.height_mm });
   height.onchange = () => change(p => { if (height.validity.valid) p.size.height_mm = height.valueAsNumber; });
+  const swapDimensions = button("Swap width and height", () => change(p => {
+    const size = p.size;
+    [size.width_mm, size.height_mm] = [size.height_mm, size.width_mm];
+    const widths = journals.find(journal => journal.id === size.preset_id)?.widths;
+    if (!widths?.includes(size.width_mm)) size.preset_id = "custom";
+  }));
+  swapDimensions.name = "swap-artboard-dimensions";
+  swapDimensions.disabled = project.size.width_mm === project.size.height_mm;
   const localData = stringField("Local data folder", state.data_root_override, async value => {
     if (pendingChange && !await pendingChange) return;
     if (automaticRefresh) await automaticRefresh;
@@ -1695,6 +1703,7 @@ function draw(updateStatus = true) {
         numeric("Grid spacing (mm)", state.geometry.grid_step,
           value => change(p => { p.layout.step_mm = value; }), .5),
       ]),
+      swapDimensions,
     ]),
     inspectorGroup("Figure style", [
       ...Object.entries(styleGroups).map(([name, keys]) => section(name, keys.map(key =>
