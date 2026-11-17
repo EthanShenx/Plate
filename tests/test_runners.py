@@ -52,6 +52,10 @@ class Runners(unittest.TestCase):
             result = render_script(project, panel, rect, workspace, None)
             self.assertIn("runner stdout", result["stdout"])
             self.assertTrue(render_script(project, panel, rect, workspace, None)["cached"])
+            package = "matplotlib" if language == "script-py" else "ggplot2"
+            self.assertIn(package, result["runtime"]["packages"])
+            self.assertTrue(result["runtime"]["version"])
+            self.assertTrue(result["metadata"]["fonts"])
             sizes = {"Axis title": 8, "Response": 8, "Annotation": 7, "0": 6, "1": 6,
                      "Legend title": 9, "Series": 6.5}
             observed = set()
@@ -68,6 +72,10 @@ class Runners(unittest.TestCase):
                 for target in (.5, .75, .4):
                     self.assertTrue(any(abs(width - target) <= .02 for width in widths), widths)
                 self.assertAlmostEqual(pdf[0].rect.width, rect["w"] * PT_PER_MM, delta=.028)
+            if language == "script-py":
+                forced = render_script(project, panel, rect, workspace, None, force=True)
+                self.assertNotEqual(forced["key"], result["key"])
+                self.assertEqual(render_script(project, panel, rect, workspace, None)["key"], forced["key"])
 
     def test_base_r_round_trip(self):
         executable = shutil.which("Rscript")

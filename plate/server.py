@@ -2,7 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -18,7 +18,7 @@ from zipfile import BadZipFile
 
 from .alignment import dependency_signature, fixed_axes, participating, validate_groups
 from .bundle import (
-    SAFE_ID, asset_path, atomic_write, import_asset, open_bundle, read_workspace, save_bundle, script_path,
+    PROVENANCE_FILE, SAFE_ID, asset_path, atomic_write, import_asset, open_bundle, read_workspace, save_bundle, script_path,
     write_json, write_workspace,
 )
 from .checks import project_checks
@@ -29,7 +29,11 @@ from .export import FORMATS, compose_pdf, rasterize
 from .native import native_signature, render_native
 from .fonts import label_metrics
 from .interpreters import discovery, interpreter, probe
-from .render import PREVIEW_DPI, data_directory, make_preview, prepare_script, render_script, seed_matplotlib_cache, signature
+from .provenance import compare_environment, read_provenance, render_environment
+from .render import (
+    PREVIEW_DPI, data_directory, input_fingerprints, make_preview, prepare_script, render_script,
+    seed_matplotlib_cache, signature,
+)
 from .style import BUILTINS, ENUMS, PT_PER_MM, TOKENS, content_box, context_for, resolve, validate_style
 from .watcher import Watcher, save_script, sync_scripts
 
@@ -84,6 +88,12 @@ def has_render_source(panel):
     return panel.type not in {"image", "vector"} or bool(panel.asset)
 
 
+class IncompleteExport(ValueError):
+    def __init__(self, issues):
+        super().__init__("Some panels do not have a current render. Review the affected panels.")
+        self.issues = issues
+
+
 class Session:
     def __init__(self, bundle=None, workspaces=WORKSPACES, *, workspace=None):
         self.workspaces = workspaces
@@ -91,6 +101,7 @@ class Session:
         if not hasattr(self, "lock"):
             self.lock = RLock()
         self.renders = {}
+        self.data_root_override = ""
         self.keep_cache = False
         self.registered_workspace = workspace is not None
         self.bundle = Path(bundle).resolve() if bundle else None
@@ -102,6 +113,7 @@ class Session:
             if isinstance(record.get("bundle"), str) and record["bundle"]:
                 self.bundle = Path(record["bundle"])
             self.saved_digest = record.get("saved_digest")
+            self.data_root_override = record.get("data_root_override", "")
         elif self.bundle:
             self.project, self.workspace = open_bundle(self.bundle, workspaces)
         else:
@@ -115,6 +127,7 @@ class Session:
         validate_style(self.project)
         validate_groups(self.project)
         validate_panel_groups(self.project)
+        self.provenance = read_provenance(self.workspace)
         index = self.workspace / "cache/index.json"
         if index.is_file():
             self.renders = json.loads(index.read_text())
@@ -135,6 +148,7 @@ class Session:
         write_json(self.workspace / "library.json", {
             "bundle": str(self.bundle or ""), "saved_digest": self.saved_digest,
             "keep_cache": self.keep_cache, "opened_at": time(),
+            "data_root_override": self.data_root_override,
         })
         self.registered_workspace = True
 
@@ -143,28 +157,35 @@ class Session:
             return {"state": "empty"}
         previous = self.renders.get(panel.id, {})
         current = self.panel_signature(panel, rect, rects)
-        if previous.get("signature") == current or not previous:
-            return {"state": "stale", **previous}
-        return {**previous, "state": "stale"}
+        if previous.get("signature") != current:
+            return {**previous, "state": "stale"}
+        if previous.get("state") == "fresh" and panel.type in SCRIPT_EXTENSIONS:
+            stamp = previous.get("interpreter_stamp")
+            if stamp:
+                try:
+                    path = interpreter(self.project, panel)
+                    if [path, Path(path).stat().st_mtime_ns] != stamp:
+                        return {**previous, "state": "stale"}
+                except (OSError, ValueError):
+                    return {**previous, "state": "stale"}
+        return {"state": "stale", **previous}
+
+    def data_folder(self):
+        return data_directory(self.project, self.workspace, self.bundle, self.data_root_override).resolve()
 
     def panel_signature(self, panel, rect, rects=None):
         try:
             if panel.type in SCRIPT_EXTENSIONS:
-                directory = data_directory(self.project, self.workspace, self.bundle).resolve()
-                previous = self.renders.get(panel.id, {})
-                version = previous.get("interpreter_stamp")
-                if version:
-                    path, stamp = version
-                    try:
-                        if Path(path).stat().st_mtime_ns != stamp:
-                            return None
-                    except OSError:
-                        return None
+                directory = self.data_folder()
                 layout_signature = (
                     dependency_signature(self.project, panel, rects or Layout(self.project).rects)
                     if self.project.alignment else signature(self.project, panel, rect)
                 )
-                return f"{layout_signature}:{directory}"
+                members = participating(self.project, {panel.id}) if self.project.alignment else {panel.id}
+                candidates = self.project.panels if self.project.alignment else (panel,)
+                inputs = {other.id: input_fingerprints(other, directory) for other in candidates
+                          if other.id in members and other.input_files}
+                return project_digest([layout_signature, str(directory), directory.is_dir(), inputs])
             return native_signature(self.project, panel, rect)
         except ValueError:
             return None
@@ -205,38 +226,45 @@ class Session:
             "workspace": str(self.workspace),
             "workspace_id": self.workspace.name,
             "workspace_registered": self.registered_workspace,
+            "data_root_override": self.data_root_override,
             "keep_cache": self.keep_cache,
             "style_tokens": TOKENS,
             "style_options": ENUMS,
             "palettes": BUILTINS,
             "renders": renders,
+            "export_issues": self.export_issues(self.export_inputs(geometry["rects"], renders)),
             "checks": project_checks(self.project, renders, presets(), resolve),
         }
 
-    def refresh(self, panel_ids):
+    def refresh(self, panel_ids, *, force=False):
         geometry = Layout(self.project).rects
         requested = participating(self.project, panel_ids)
         panels = [panel for panel in self.project.panels if panel.id in requested and has_render_source(panel)]
         if not panels:
             return
         scripts = [panel for panel in panels if panel.type in SCRIPT_EXTENSIONS]
+        signatures = {panel.id: self.panel_signature(panel, geometry[panel.id], geometry) for panel in scripts}
         workers = min(MAX_RENDER_WORKERS, os.cpu_count() or 1, len(scripts))
         if workers > 1:
             with ThreadPoolExecutor(max_workers=workers) as executor:
-                self.refresh_batch(panels, geometry, {}, executor)
-                self.align_renders(scripts, geometry, executor)
+                self.refresh_batch(panels, geometry, {}, executor, force=force)
+                self.align_renders(scripts, geometry, executor, force=force)
         else:
             for panel in panels:
-                self.refresh_panel(panel, geometry[panel.id])
-            self.align_renders(scripts, geometry)
+                self.refresh_panel(panel, geometry[panel.id], force=force)
+            self.align_renders(scripts, geometry, force=force)
+        for panel in scripts:
+            self.renders[panel.id]["signature"] = signatures[panel.id]
         write_json(self.workspace / "cache/index.json", self.renders)
 
-    def refresh_pending(self):
+    def refresh_pending(self, *, force=False):
         rects = Layout(self.project).rects
         self.refresh([panel.id for panel in self.project.panels
-                      if self.render_state(panel, rects[panel.id], rects)["state"] in {"stale", "error"}])
+                      if force or self.render_state(panel, rects[panel.id], rects)["state"] in {"stale", "error"}
+                      or (has_render_source(panel) and self.render_pdf(self.renders.get(panel.id, {})) is None)],
+                     force=force)
 
-    def refresh_batch(self, panels, geometry, contexts, executor):
+    def refresh_batch(self, panels, geometry, contexts, executor, *, force=False):
         # Only subprocess execution runs concurrently. PDF processing and
         # session state stay on the request thread.
         with ExitStack() as stack:
@@ -249,7 +277,8 @@ class Session:
                 try:
                     job, finish = stack.enter_context(prepare_script(
                         self.project, panel, rect, self.workspace, self.bundle,
-                        contexts.get(panel.id), matplotlib_cache=self.matplotlib_cache))
+                        contexts.get(panel.id), matplotlib_cache=self.matplotlib_cache,
+                        data_root=self.data_root_override, force=force))
                     if finish is None:
                         self.store_render(panel, rect, job, geometry)
                         continue
@@ -274,7 +303,7 @@ class Session:
                     for panel in users:
                         self.store_render(panel, geometry[panel.id], result.copy(), geometry)
 
-    def align_renders(self, scripts, geometry, executor=None):
+    def align_renders(self, scripts, geometry, executor=None, *, force=False):
         if not self.project.alignment:
             return
         measured = {panel.id: self.renders[panel.id].get("metadata", {}).get("axes")
@@ -286,10 +315,10 @@ class Session:
                        "fixed_axes": targets[panel.id]} for panel in aligned
         }
         if executor and len(aligned) > 1:
-            self.refresh_batch(aligned, geometry, contexts, executor)
+            self.refresh_batch(aligned, geometry, contexts, executor, force=force)
         else:
             for panel in aligned:
-                self.refresh_panel(panel, geometry[panel.id], contexts[panel.id])
+                self.refresh_panel(panel, geometry[panel.id], contexts[panel.id], force=force)
         for panel in scripts:
             if panel.id in contexts:
                 actual = self.renders[panel.id].get("metadata", {}).get("axes")
@@ -298,13 +327,13 @@ class Session:
                     warnings.setdefault(panel.id, []).append("The plot could not reach the requested alignment.")
             result = self.renders[panel.id]
             result["warnings"] = [*result.get("warnings", []), *warnings.get(panel.id, [])]
-            result["signature"] = self.panel_signature(panel, geometry[panel.id], geometry)
 
-    def refresh_panel(self, panel, rect, context=None):
+    def refresh_panel(self, panel, rect, context=None, *, force=False):
         try:
             if panel.type in SCRIPT_EXTENSIONS:
                 result = render_script(self.project, panel, rect, self.workspace, self.bundle, context,
-                                       matplotlib_cache=self.matplotlib_cache)
+                                       matplotlib_cache=self.matplotlib_cache, data_root=self.data_root_override,
+                                       force=force)
             else:
                 result = render_native(self.project, panel, rect, self.workspace)
             self.store_render(panel, rect, result)
@@ -361,13 +390,81 @@ class Session:
             raise ValueError("Choose a .plate file to save.")
         if path.suffix.lower() != ".plate":
             path = path.with_suffix(".plate")
-        if cache:
-            write_json(self.workspace / "cache/index.json", self.renders)
-        save_bundle(self.project, self.workspace, path, cache, write_scripts=False)
-        self.bundle = path.resolve()
+        path = path.resolve()
+        project = self.project
+        if self.bundle or project.data_root:
+            original = data_directory(project, self.workspace, self.bundle).resolve()
+            new_root = data_directory(project, self.workspace, path).resolve()
+            if new_root != original:
+                root = os.path.relpath(original, path.parent)
+                project = replace(project, data_root="" if root == "." else root)
+        provenance = self.current_provenance()
+        write_json(self.workspace / "cache/index.json", self.renders)
+        save_bundle(project, self.workspace, path, cache, write_scripts=False, provenance=provenance)
+        write_json(self.workspace / PROVENANCE_FILE, provenance)
+        self.provenance = provenance
+        self.project, self.bundle = project, path
         self.keep_cache = bool(cache)
         self.saved_digest = project_digest(asdict(self.project))
         self.remember_workspace()
+
+    def current_provenance(self, *, prefer_saved=False):
+        state = self.state()
+        recorded = {}
+        for panel in self.project.panels:
+            render = state["renders"][panel.id]
+            baseline = self.provenance.get(panel.id)
+            if render["state"] == "fresh" and not (prefer_saved and baseline):
+                baseline = render_environment(panel, render) or baseline
+            if baseline:
+                recorded[panel.id] = baseline
+        return recorded
+
+    def environment_report(self):
+        return compare_environment(self.project, self.current_provenance(prefer_saved=True), self.data_folder())
+
+    def remap_data_folder(self, location):
+        if not isinstance(location, str):
+            raise ValueError("Enter a folder path.")
+        folder = Path(location).expanduser()
+        if location and (not folder.is_absolute() or not folder.is_dir()):
+            raise ValueError("Choose an existing absolute path for the local data folder.")
+        self.data_root_override = str(folder.resolve()) if location else ""
+
+    def render_pdf(self, render):
+        key = render.get("key")
+        if isinstance(key, str) and SAFE_ID.fullmatch(key):
+            source = self.workspace / "cache" / f"{key}.pdf"
+            if source.is_file():
+                return source
+        return None
+
+    def export_inputs(self, rects, renders):
+        for panel in self.project.panels:
+            rect = rects[panel.id]
+            style = resolve(self.project, panel)["style"]
+            render = renders[panel.id]
+            source = self.render_pdf(render)
+            try:
+                box = content_box(rect, panel, style)
+            except ValueError:
+                source, box = None, rect
+            yield panel, render, (source, box, panel.label, rect, style)
+
+    def export_issues(self, inputs):
+        issues = []
+        for panel, render, (source, *_) in inputs:
+            state = render["state"]
+            if state == "fresh" and source:
+                continue
+            reason = {
+                "stale": "Render is out of date.",
+                "error": render.get("error") or "Render failed.",
+                "empty": "No script or asset is set.",
+            }.get(state, "Rendered artwork is missing.")
+            issues.append({"panel": panel.id, "name": panel.name, "label": panel.label,
+                           "reason": reason, "uses_previous": source is not None})
+        return issues
 
     def export(self, data):
         format = data["format"]
@@ -377,26 +474,20 @@ class Session:
         if self.bundle and path.resolve() == self.bundle:
             raise ValueError("Choose a separate destination for the export.")
         rects = Layout(self.project).rects
-        panels = []
-        for panel in self.project.panels:
-            previous = self.render_state(panel, rects[panel.id])
-            key = previous.get("key")
-            source = self.workspace / "cache" / f"{key}.pdf" if key else None
-            if source and not source.is_file():
-                source = None
-            style = resolve(self.project, panel)["style"]
-            rect = rects[panel.id]
-            try:
-                box = content_box(rect, panel, style)
-            except ValueError:
-                source, box = None, rect
-            panels.append((source, box, panel.label, rect, style))
+        renders = {panel.id: self.render_state(panel, rects[panel.id], rects)
+                   for panel in self.project.panels}
+        inputs = list(self.export_inputs(rects, renders))
+        issues = self.export_issues(inputs)
+        draft = data.get("draft") is True
+        if issues and (not draft or data.get("reviewed_issues", issues) != issues):
+            raise IncompleteExport(issues)
+        panels = [entry for _, _, entry in inputs]
         size = self.project.size
         result = compose_pdf(size.width_mm, size.height_mm, panels)
         if format != "pdf":
             result = rasterize(result, size.width_mm, size.height_mm, format, data["dpi"])
         atomic_write(path, lambda file: file.write_bytes(result))
-        return {"path": str(path.resolve())}
+        return {"path": str(path.resolve()), "draft": draft, "export_issues": issues}
 
     def action(self, endpoint, data):
         sync_scripts(self.project, self.workspace)
@@ -435,12 +526,22 @@ class Session:
             return result
         if endpoint == "/api/export":
             return self.export(data)
+        if endpoint == "/api/export-preflight":
+            self.refresh_pending()
+            return self.state()
         if endpoint == "/api/refresh":
             requested = data.get("panels")
+            force = data.get("force") is True
             if requested is None:
-                self.refresh_pending()
+                self.refresh_pending(force=force)
             else:
-                self.refresh(requested)
+                self.refresh(requested, force=force)
+            return self.state()
+        if endpoint == "/api/environment":
+            return self.environment_report()
+        if endpoint == "/api/local-data-folder":
+            self.remap_data_folder(data["path"])
+            self.remember_workspace()
             return self.state()
         if endpoint == "/api/interpreters":
             return discovery(data.get("venvs", []))
@@ -469,6 +570,7 @@ class Session:
             loaded.initialize_native_panels()
             self.project, self.workspace, self.bundle = loaded.project, loaded.workspace, loaded.bundle
             self.renders, self.keep_cache = loaded.renders, loaded.keep_cache
+            self.provenance, self.data_root_override = loaded.provenance, loaded.data_root_override
             self.saved_digest = loaded.saved_digest
             self.registered_workspace = loaded.registered_workspace
         elif endpoint == "/api/save":
@@ -556,10 +658,15 @@ class Handler(BaseHTTPRequestHandler):
             with self.server.session.lock:
                 session = self.server.session
                 sync_scripts(session.project, session.workspace)
+                rects = Layout(session.project).rects
                 self.json({
                     "id": session.project.id,
                     "scripts": {panel.id: panel.script for panel in session.project.panels
                                 if panel.type in SCRIPT_EXTENSIONS},
+                    "stale_inputs": [
+                        panel.id for panel in session.project.panels if panel.input_files
+                        and session.render_state(panel, rects[panel.id], rects)["state"] == "stale"
+                    ],
                 })
         elif path == "/api/project":
             with self.server.session.lock:
@@ -590,6 +697,8 @@ class Handler(BaseHTTPRequestHandler):
             with self.server.session.lock:
                 result = self.server.session.action(urlsplit(self.path).path, data)
             self.json(result)
+        except IncompleteExport as error:
+            self.json({"error": str(error), "export_issues": error.issues}, 409)
         except (ValueError, TypeError, KeyError, OSError, BadZipFile, StopIteration, subprocess.SubprocessError) as error:
             self.json({"error": str(error)}, 400)
 

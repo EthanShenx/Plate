@@ -33,7 +33,7 @@ class HeadlessAuthoring(unittest.TestCase):
             spec.write_text(json.dumps({
                 "size": {"width_mm": 100, "height_mm": 60},
                 "panels": [
-                    {"id": "plot", "label": "a", "script_file": "plot.py",
+                    {"id": "plot", "label": "a", "script_file": "plot.py", "input_files": ["value.txt"],
                      "rect": {"x": 2, "y": 2, "w": 45, "h": 56}},
                     {"id": "note", "label": "b", "type": "text", "settings": {"text": "Synthetic data"},
                      "rect": {"x": 51, "y": 2, "w": 45, "h": 56}},
@@ -56,6 +56,34 @@ class HeadlessAuthoring(unittest.TestCase):
             with pymupdf.open(export) as pdf:
                 self.assertIn("First rendering", pdf[0].get_text())
                 self.assertIn("Synthetic data", pdf[0].get_text())
+
+            (root / "value.txt").write_text("Updated rendering")
+            inspected = self.run_plate(0, "inspect", revised, "--compare-environment")
+            self.assertEqual(inspected["panels"][0]["state"], "stale")
+            self.assertIn("matplotlib", inspected["provenance"]["plot"]["packages"])
+            self.assertEqual(inspected["environment"]["panels"][0]["differences"], [])
+            self.run_plate(0, "export", revised, "--output", export)
+            with pymupdf.open(export) as pdf:
+                self.assertIn("Updated rendering", pdf[0].get_text())
+
+            relocated = root / "relocated"
+            relocated.mkdir()
+            (relocated / "value.txt").write_text("Relocated rendering")
+            self.run_plate(0, "export", revised, "--data-root", relocated, "--force", "--output", export)
+            with pymupdf.open(export) as pdf:
+                self.assertIn("Relocated rendering", pdf[0].get_text())
+
+            (root / "value.txt").unlink()
+            self.assertEqual(self.run_plate(1, "export", revised, "--output", export)
+                             ["export_issues"][0]["panel"], "plot")
+            with pymupdf.open(export) as pdf:
+                self.assertIn("Relocated rendering", pdf[0].get_text())
+            draft = self.run_plate(0, "export", revised, "--draft", "--output", export)
+            self.assertTrue(draft["draft"])
+            self.assertTrue(draft["export_issues"][0]["uses_previous"])
+            with pymupdf.open(export) as pdf:
+                self.assertIn("First rendering", pdf[0].get_text())
+            (root / "value.txt").write_text("Updated rendering")
 
             valid_bundle = revised.read_bytes()
             patch.write_text(json.dumps({"panels": [{"id": "plot", "script": "raise ValueError('Broken plot')"}]}))

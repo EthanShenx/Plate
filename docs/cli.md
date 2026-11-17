@@ -11,7 +11,9 @@ Run these commands from the Plate checkout with its Python environment. They use
 
 For a raster proof or final raster export, use `--output proof.png` or `--output figure.tiff` and optionally `--dpi 300`, `600` or `1200`.
 
-Each command prints one JSON object with `ok`. Successful commands return the project size, panel IDs and rectangles, groups, and checks. Export also returns the output path. Build, apply and export render out-of-date panels before writing the requested file. Render failures return panel errors and captured stderr, exit with status 1, and leave the requested output untouched. Print checks such as possible text overlaps are advisory. Their results include the panel ID and available bounding boxes in PDF points. Inspect reads the saved bundle and does not run scripts.
+Each command prints one JSON object with `ok`. Successful commands return the project size, panel IDs and rectangles, groups, and checks. Export also returns the output path. Build, apply and export render out-of-date panels before writing the requested file. Render failures return panel errors and captured stderr, exit with status 1, and leave the requested output untouched. A complete export requires current artwork for every panel. Use `export --draft` to allow previous or missing artwork. The JSON response identifies the affected panels under `export_issues` and reports which ones use a previous render. Print checks such as possible text overlaps are advisory.
+
+Use `--force` with build, apply or export to rerun scripts even when their cached renders match. Inspect reads the saved bundle and reports recorded render environments without running panel scripts. Use `inspect --compare-environment` to compare recorded interpreter, package, and font information with local installations. Use `--data-root /path/to/data` with inspect or export to use a local data folder for that invocation.
 
 ## Figure specification
 
@@ -44,7 +46,7 @@ Coordinates use millimetres from the upper left of the artboard. The order of pa
 
 Use `script-r` for R, `script-py` for Python, or `text`, `legend`, `image` and `vector` for native panels. For a script panel, set `script_file` or provide source via `script`. For imported artwork set `asset_file`. See [the script contract](script-contract.md) for the Python and R entry points.
 
-Optional project fields include `palettes`, `alignment`, `interpreters`, `data_root`, `grid_mm`, and `timeout_s`. Panel records can also set `name`, `settings`, `overrides`, `locks` and `interpreter`. When external data changes, rebuild from the source specification to refresh plots whose code has stayed the same.
+Optional project fields include `palettes`, `alignment`, `interpreters`, `data_root`, `grid_mm`, and `timeout_s`. Panel records can also set `name`, `settings`, `overrides`, `locks` and `interpreter`. Script panels can declare `input_files`, for example `["counts.csv", "helpers.py"]`. These paths are relative to the active data folder. Changing either file invalidates the panel’s cached render.
 
 An apply patch updates panels by ID. Unlisted panels keep their geometry and source. A new panel requires a complete rectangle. A patch can update selected rectangle coordinates or replace a script. If you supply `groups` or `alignment`, it replaces that list. To delete panels, pass their IDs in `remove_panels`.
 

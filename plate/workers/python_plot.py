@@ -1,6 +1,8 @@
 """Executed in the plotting interpreter, independently of the server."""
 
+from importlib import metadata as packages
 import json
+import os
 from pathlib import Path
 import runpy
 import sys
@@ -174,6 +176,7 @@ def main():
     if context["inject"]:
         apply_style(style, context["palette"])
     sys.path.insert(0, str(Path(script).parent))
+    sys.path.insert(1, os.getcwd())
     namespace = runpy.run_path(script, init_globals={"plate": plate}, run_name="__main__")
     fig = namespace.get("fig")
     if not isinstance(fig, mpl.figure.Figure):
@@ -194,7 +197,12 @@ def main():
     with mpl.rc_context({"savefig.bbox": None, "pdf.fonttype": 42}):
         fig.savefig(output, format="pdf", bbox_inches=None, dpi=300,
                     transparent=context["inject"] and style["background"] == "none")
-    Path(metadata).write_text(json.dumps({"axes": bounds}))
+    distributions = packages.packages_distributions()
+    imported = {name for module in sys.modules.copy() if "." not in module
+                for name in distributions.get(module, ())}
+    runtime = {"version": sys.version.split()[0],
+               "packages": {name: packages.version(name) for name in sorted(imported)}}
+    Path(metadata).write_text(json.dumps({"axes": bounds, "runtime": runtime}))
 
 
 if __name__ == "__main__":

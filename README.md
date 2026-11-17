@@ -29,11 +29,15 @@ Use `brew install librsvg` if you plan to import SVG. If **Dependencies** report
 4. Select a script panel and choose **Edit script**. **Run** saves and renders it. Choose **More → Show script in Finder** to locate the live workspace file. Changes saved in an external editor reload into CodeMirror. Use **Checks** to locate print-size warnings.
 5. Choose **File → Save as…** to save a separate `.plate` bundle and optionally include previews. **Save** writes subsequent changes to that bundle. Choose **Export** for an editable PDF or an RGB TIFF/PNG at 300, 600 or 1200 dpi.
 
+In a script panel’s **Source → Render inputs**, list the data files and helper scripts it reads. Plate refreshes the panel when a listed file changes. Use **Edit script → More → Force render** for a database query or another input outside that list. Export refreshes pending panels and requires current artwork for every panel. If any panel is incomplete, the dialog lists what a draft would reuse or omit and lets you explicitly choose **Export draft**.
+
 Pinch over the canvas to zoom. **Fit** fits the figure to the workspace and **100%** resets the display scale. **⌘ Enter** refreshes the selected panel and **⌘ Shift Enter** refreshes all out-of-date panels. **⌘ Z** and **⌘ Shift Z** undo and redo figure changes. CodeMirror has its own text history.
 
 Drag from empty canvas space to select several panels, or Shift-click panels to add or remove them. Drag a selected panel to move the selection, or drag a selection corner to scale it. In **Selection geometry**, use **Set panel sizes** to give each panel the same width or height. Press **Esc** to clear the selection.
 
 A `.plate` file contains layout, styles, scripts and imported figure assets. Data files loaded by scripts stay in their original locations. Set **Advanced → Data folder** or place your data relative to the bundle directory. Use **File → Show workspace in Finder** to inspect extracted project files and logs. The script contract covers plotting, styling and running the helpers outside Plate.
+
+Saved bundles also record interpreter and loaded package versions and the fonts found in successful renders, even when previews are excluded. In **Figure settings → Advanced**, choose **Compare render environment** to check that record against local installations. Set **Local data folder** to use a different data location for this workspace. Clear it to use the bundle’s data folder again. The local path stays with the workspace.
 
 Run the local test suite with `make test` after installing the plotting prerequisites. The render tests report missing interpreters or plotting packages as skips. See the [script contract](docs/script-contract.md), [architecture](ARCHITECTURE.md) and [export acceptance checklist](docs/ACCEPTANCE.md).
 

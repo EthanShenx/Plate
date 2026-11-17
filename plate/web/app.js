@@ -71,7 +71,11 @@ async function request(path, body) {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   });
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || response.statusText);
+  if (!response.ok) {
+    const error = new Error(data.error || response.statusText);
+    error.exportIssues = data.export_issues;
+    throw error;
+  }
   return data;
 }
 
@@ -822,7 +826,7 @@ function drawRenderState() {
   syncRefresh();
 }
 
-async function refresh(ids) {
+async function refresh(ids, force = false) {
   if (busy || panelGesture) return;
   const panels = ids || pendingPanels();
   if (!panels.length) return;
@@ -846,7 +850,7 @@ async function refresh(ids) {
   syncRefresh();
   busy = true;
   try {
-    state = await request("/api/refresh", { panels });
+    state = await request("/api/refresh", { panels, force });
     drawRenderState();
     scheduleRefresh();
   } catch (error) {
@@ -1214,10 +1218,18 @@ function drawPanelInspector(panel) {
     editScript.id = "edit-script";
     editScript.className = "inspector-edit";
     editScript.prepend(icon("code"));
+    const inputs = document.createElement("textarea");
+    Object.assign(inputs, { rows: 3, value: (panel.input_files || []).join("\n"), spellcheck: false });
+    inputs.onchange = () => editPanel(panel, p => {
+      p.input_files = inputs.value.split("\n").map(path => path.trim()).filter(Boolean);
+    });
+    const hint = document.createElement("p");
+    hint.className = "inspector-hint";
+    hint.textContent = "Enter one data file or helper script per line. Relative paths start at the data folder.";
     controls.push(inspectorGroup("Source", [editScript, section("Interpreter", [
       interpreterField("Interpreter path", panel.type, panel.interpreter,
         value => editPanel(panel, p => { p.interpreter = value; })),
-    ])]));
+    ]), section("Render inputs", [field("Input files", inputs), hint])]));
   } else controls.splice(1, 0, inspectorGroup("Content", nativeInspector(panel)));
   const actions = document.createElement("div");
   actions.className = "panel-actions";
@@ -1368,7 +1380,8 @@ async function pollScripts() {
     const result = await request("/api/scripts");
     if (busy || panelGesture || state !== previous || result.id !== state.project.id) return;
     const changed = state.project.panels.some(panel => isScript(panel) && result.scripts[panel.id] !== panel.script);
-    if (changed) {
+    const updatedInputs = result.stale_inputs.some(id => state.renders[id]?.state !== "stale");
+    if (changed || updatedInputs) {
       const latest = await request("/api/project");
       if (busy || panelGesture || state !== previous || latest.project.id !== state.project.id) return;
       state = latest;
@@ -1383,11 +1396,11 @@ function activeScript() {
   return state.project.panels.find(panel => panel.id === selected && isScript(panel));
 }
 
-async function runSelected() {
+async function runSelected(force = false) {
   if (automaticRefresh) await automaticRefresh;
   if (pendingChange && !await pendingChange) return;
   const panel = activeScript();
-  if (panel && await saveDraft(panel)) await refresh([panel.id]);
+  if (panel && await saveDraft(panel)) await refresh([panel.id], force);
 }
 
 async function findInterpreters() {
@@ -1610,6 +1623,12 @@ function draw(updateStatus = true) {
   height.onchange = () => change(p => { if (height.validity.valid) p.size.height_mm = height.valueAsNumber; });
   const projectOptions = [
     stringField("Data folder", project.data_root, value => change(p => { p.data_root = value; })),
+    stringField("Local data folder", state.data_root_override, async value => {
+      if (pendingChange && !await pendingChange) return;
+      if (automaticRefresh) await automaticRefresh;
+      await commit("/api/local-data-folder", { path: value.trim() }, false);
+    }),
+    button("Compare render environment", showEnvironmentReport),
     numeric("Render timeout (s)", project.timeout_s, value => change(p => { p.timeout_s = value; }), 1),
     ...["script-r", "script-py"].map(type =>
       interpreterField(type === "script-r" ? "Default Rscript" : "Default Python", type, project.interpreters[type] || "",
@@ -1978,6 +1997,29 @@ $("#show-inspector").onclick = () => { if (state) { showChecks = false; drawChec
 $("#show-checks").onclick = () => { if (state) { showChecks = true; drawChecks(); } };
 
 const exportDialog = $("#export-dialog");
+let reviewedExportIssues = [];
+
+function drawExportIssues(issues) {
+  reviewedExportIssues = issues;
+  $("#export-incomplete").hidden = !issues.length;
+  $("#export-draft").checked = false;
+  $("#export-issues").replaceChildren(...issues.map(issue => {
+    const item = document.createElement("li");
+    const name = issue.label ? `${issue.label} · ${issue.name}` : issue.name;
+    item.textContent = `${name}. ${issue.reason} ${issue.uses_previous ?
+      "Draft uses the previous render." : "Draft omits the artwork."}`;
+    return item;
+  }));
+  syncExportButton();
+}
+
+function syncExportButton() {
+  const draft = $("#export-draft").checked;
+  $("#submit-export").textContent = draft ? "Export draft" : "Export";
+  $("#submit-export").disabled = reviewedExportIssues.length > 0 && !draft;
+}
+
+$("#export-draft").onchange = syncExportButton;
 $("#export-format").onchange = () => {
   const format = $("#export-format").value;
   const path = $("#export-path");
@@ -1987,9 +2029,19 @@ $("#export-format").onchange = () => {
 };
 $("#export").onclick = async () => {
   if (automaticRefresh) await automaticRefresh;
-  if (!state || busy) return;
-  const stale = stalePanels();
-  if (stale.length) await refresh(stale);
+  if (!state || busy || (pendingChange && !await pendingChange) || !await saveAllDrafts()) return;
+  busy = true;
+  clearTimeout(refreshTimer);
+  report("Preparing export…");
+  try {
+    state = await request("/api/export-preflight", {});
+    drawRenderState();
+    reportProjectStatus();
+  } catch (error) {
+    report(error.message);
+    return;
+  } finally { busy = false; }
+  drawExportIssues(state.export_issues);
   const count = state.checks.length;
   $("#export-warnings").hidden = !count;
   $("#export-warnings").textContent = `Review ${count} ${count === 1 ? "warning" : "warnings"}`;
@@ -2009,18 +2061,26 @@ $("#export-form").onsubmit = async event => {
   event.preventDefault();
   const submit = event.submitter;
   submit.disabled = true;
+  $("#export-draft").disabled = true;
   formError("#export-error");
   try {
     const result = await request("/api/export", {
       format: $("#export-format").value, dpi: Number($("#export-dpi").value), path: $("#export-path").value,
+      draft: $("#export-draft").checked, reviewed_issues: reviewedExportIssues,
     });
     exportDialog.close();
-    report(`Exported ${result.path}`);
-  } catch (error) { formError("#export-error", error.message); }
-  finally { submit.disabled = false; }
+    report(`Exported ${result.draft ? "draft to " : ""}${result.path}`);
+  } catch (error) {
+    if (error.exportIssues) drawExportIssues(error.exportIssues);
+    formError("#export-error", error.message);
+  } finally {
+    $("#export-draft").disabled = false;
+    syncExportButton();
+  }
 };
 $("#save-script").onclick = () => { const panel = activeScript(); if (panel) saveDraft(panel); };
-$("#run-script").onclick = runSelected;
+$("#run-script").onclick = () => runSelected();
+$("#force-render").onclick = () => runSelected(true);
 $("#close-editor").onclick = () => {
   editorOpen = false;
   drawEditor(activeScript());
@@ -2039,6 +2099,51 @@ $("#dependencies").onclick = async () => {
       `${info.version}\n${info.path}\nRequired packages are installed.`);
   } catch (error) { if (editorId === panel.id) showConsole(error.message); }
 };
+
+async function showEnvironmentReport() {
+  const dialog = $("#environment-dialog");
+  const content = $("#environment-report");
+  content.textContent = "Checking local interpreters and fonts…";
+  dialog.showModal();
+  try {
+    const result = await request("/api/environment", {});
+    const folder = document.createElement("p");
+    folder.textContent = `Data folder ${result.data_folder}${result.data_folder_available ? "" : " (unavailable)"}`;
+    content.replaceChildren(folder);
+    if (!result.panels.length) {
+      const empty = document.createElement("p");
+      empty.textContent = "Render a panel to record its environment.";
+      content.append(empty);
+    }
+    for (const panel of result.panels) {
+      const label = document.createElement("summary");
+      label.textContent = panel.name + (panel.differences.length ?
+        ` · ${panel.differences.length} differences` : " · Matches");
+      const details = document.createElement("details");
+      details.open = panel.differences.length > 0;
+      details.append(label);
+      if (panel.recorded.version) {
+        const interpreter = document.createElement("p");
+        interpreter.textContent = `Recorded ${panel.recorded.interpreter} (${panel.recorded.version}). Local ${panel.local.interpreter || "interpreter unavailable"}.`;
+        details.append(interpreter);
+      }
+      const changes = document.createElement("ul");
+      for (const difference of panel.differences) {
+        const item = document.createElement("li");
+        item.textContent = `${difference.item} — recorded ${difference.recorded}, local ${difference.local ?? "unavailable"}${difference.detail ? ` (${difference.detail})` : ""}`;
+        changes.append(item);
+      }
+      if (changes.childElementCount) details.append(changes);
+      const files = document.createElement("p");
+      const packages = Object.entries(panel.recorded.packages || {}).map(([name, version]) => `${name} ${version}`);
+      const fonts = Object.keys(panel.recorded.fonts);
+      files.textContent = [packages.length && `Packages · ${packages.join(", ")}`,
+        fonts.length && `Fonts · ${fonts.join(", ")}`].filter(Boolean).join("\n");
+      if (files.textContent) details.append(files);
+      content.append(details);
+    }
+  } catch (error) { content.textContent = error.message; }
+}
 $("#reveal-script").onclick = async () => {
   const panel = activeScript();
   if (!panel) return;

@@ -39,6 +39,7 @@ class Panel:
     interpreter: str = ""
     script: str = ""
     asset: str = ""
+    input_files: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -55,6 +56,15 @@ class Project:
     timeout_s: float = 60
     alignment: list[dict] = field(default_factory=list)
     groups: list[dict] = field(default_factory=list)
+
+    def __post_init__(self):
+        for panel in self.panels:
+            paths = panel.input_files
+            if (not isinstance(paths, list) or any(
+                    not isinstance(path, str) or not path.strip() or "\0" in path for path in paths)):
+                raise ValueError("Panel input files must be a list of nonempty paths.")
+            if paths and panel.type not in SCRIPT_EXTENSIONS:
+                raise ValueError("Only script panels can declare input files.")
 
 
 def project_from_dict(data):

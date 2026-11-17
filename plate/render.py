@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import lru_cache
 from hashlib import sha256
 from itertools import chain
 import json
@@ -11,18 +12,21 @@ from pathlib import Path
 import re
 import shutil
 import signal
+from stat import S_ISREG
 import subprocess
 from tempfile import TemporaryDirectory
 from time import monotonic
+from uuid import uuid4
 
-from .bundle import script_path, write_json, atomic_write
+from .bundle import SAFE_ID, script_path, write_json, atomic_write
 from .checks import text_collisions
+from .fonts import pdf_font_versions
 from .interpreters import interpreter, login_path, probe
 from .style import HELPERS, PT_PER_MM, context_for
 
 WORKERS = Path(__file__).parent / "workers"
 ABSOLUTE_PATH = re.compile(r"""['"](?:/(?!/)|[A-Za-z]:[\\/]|~/)""")
-ENGINE_VERSION = 4
+ENGINE_VERSION = 5
 PREVIEW_DPI = (130, 260, 520, 1040)
 MAX_PREVIEW_PIXELS = 12_000_000
 
@@ -57,7 +61,8 @@ def pdf_metadata(path):
             if w and h:
                 dpi.append(min(image["width"] * 72 / w, image["height"] * 72 / h))
         collisions, count = text_collisions(page)
-        return {"text": text, "page_pt": [page.rect.width, page.rect.height], "effective_dpi": dpi,
+        return {"text": text, "fonts": pdf_font_versions(pdf, page),
+                "page_pt": [page.rect.width, page.rect.height], "effective_dpi": dpi,
                 "text_collisions": collisions, "text_collision_count": count}
 
 
@@ -158,11 +163,44 @@ def plot_process(command, cwd, env, timeout):
         return process.returncode, output.decode(errors="replace"), errors.decode(errors="replace")
 
 
-def data_directory(project, workspace, bundle):
+def data_directory(project, workspace, bundle, override=None):
+    if override:
+        return Path(override)
     if project.data_root:
         root = Path(project.data_root).expanduser()
         return root if root.is_absolute() else (bundle.parent if bundle else workspace) / root
     return bundle.parent if bundle else workspace
+
+
+@lru_cache(maxsize=512)
+def file_digest(path, stamp):
+    digest = sha256()
+    with path.open("rb") as stream:
+        opened = os.fstat(stream.fileno())
+        if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != stamp:
+            raise OSError("Input changed while opening.")
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+        closed = os.fstat(stream.fileno())
+        if (closed.st_dev, closed.st_ino, closed.st_size, closed.st_mtime_ns, closed.st_ctime_ns) != stamp:
+            raise OSError("Input changed while reading.")
+    return digest.hexdigest()
+
+
+def input_fingerprints(panel, directory):
+    fingerprints = {}
+    for declared in sorted(set(panel.input_files)):
+        try:
+            path = (directory / Path(declared).expanduser()).resolve()
+            stat = path.stat()
+            if not S_ISREG(stat.st_mode):
+                fingerprints[declared] = None
+                continue
+            stamp = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+            fingerprints[declared] = file_digest(path, stamp)
+        except (OSError, RuntimeError, ValueError):
+            fingerprints[declared] = None
+    return fingerprints
 
 
 def seed_matplotlib_cache(cache, workspaces):
@@ -189,31 +227,42 @@ class ScriptJob:
 
 
 @contextmanager
-def prepare_script(project, panel, rect, workspace, bundle, context=None, *, matplotlib_cache=None):
+def prepare_script(project, panel, rect, workspace, bundle, context=None, *,
+                   matplotlib_cache=None, data_root=None, force=False):
     started = monotonic()
     context = context or context_for(project, panel, rect)
     path = interpreter(project, panel)
+    stamp = Path(path).stat().st_mtime_ns
     info = probe(path, panel.type)
     if info["missing"]:
         info = probe(path, panel.type, refresh=True)
     if info["missing"]:
         raise RenderError("Missing packages: " + ", ".join(info["missing"]), stderr=info["install"])
-    cwd = data_directory(project, workspace, bundle).resolve()
+    cwd = data_directory(project, workspace, bundle, data_root).resolve()
     if not cwd.is_dir():
         raise RenderError(f"Data root does not exist: {cwd}")
-    key = signature(project, panel, rect, context, path, info["version"] + str(cwd))
+    inputs = input_fingerprints(panel, cwd)
+    unavailable = [name for name, digest in inputs.items() if digest is None]
+    if unavailable:
+        raise RenderError("Input files are missing, unreadable or changing: " + ", ".join(unavailable))
+    version = json.dumps([info["version"], stamp, str(cwd), inputs], sort_keys=True)
+    key = signature(project, panel, rect, context, path, version)
     cache = workspace / "cache"
     cache.mkdir(exist_ok=True)
-    output, preview, record = [cache / f"{key}.{ext}" for ext in ("pdf", "png", "json")]
-    if output.is_file() and preview.is_file() and record.is_file():
-        yield {**json.loads(record.read_text()), "cached": True}, None
-        return
+    record = cache / f"{key}.json"
+    if not force and record.is_file():
+        cached = json.loads(record.read_text())
+        artifact = cached["key"]
+        if SAFE_ID.fullmatch(artifact) and all((cache / f"{artifact}.{ext}").is_file()
+                                              for ext in ("pdf", "png")):
+            yield {**cached, "cached": True}, None
+            return
 
     with TemporaryDirectory(dir=workspace) as folder:
         folder = Path(folder)
         write_json(folder / "style.json", context)
         env = {**os.environ, "PATH": login_path(), "PLATE_STYLE": str(folder / "style.json"),
-               "MPLBACKEND": "Agg", "PYTHONPATH": str(HELPERS / "python") + (
+               "MPLBACKEND": "Agg", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(HELPERS / "python") + (
                    os.pathsep + os.environ["PYTHONPATH"] if "PYTHONPATH" in os.environ else "")}
         if panel.type == "script-py":
             config = matplotlib_cache or workspace / "matplotlib"
@@ -233,10 +282,13 @@ def prepare_script(project, panel, rect, workspace, bundle, context=None, *, mat
             status, stdout, stderr = process_result
             if status or not pdf.is_file():
                 raise RenderError(f"Plot process exited with status {status}.", stdout, stderr)
+            if input_fingerprints(panel, cwd) != inputs:
+                raise RenderError("An input file changed during rendering. Refresh the panel.", stdout, stderr)
             try:
                 if panel.type == "script-r":
                     normalize_r_pdf(pdf, context["size_mm"])
                 layout = json.loads(metadata.read_text())
+                runtime = layout.pop("runtime")
                 layout["axes"], fitted = fit_pdf_text(pdf, layout.get("axes"))
                 parsed = {**pdf_metadata(pdf), **layout}
                 if any(abs(mm * PT_PER_MM - pt) > 0.01 * PT_PER_MM
@@ -244,14 +296,16 @@ def prepare_script(project, panel, rect, workspace, bundle, context=None, *, mat
                     raise ValueError("Plot device did not produce the requested physical size.")
             except (OSError, ValueError, RuntimeError) as error:
                 raise RenderError(str(error), stdout, stderr) from error
-            make_preview(pdf, preview)
-            os.replace(pdf, output)
+            # A forced render gets a new preview URL even with identical inputs.
+            artifact = sha256(f"{key}:{uuid4().hex}".encode()).hexdigest() if force else key
+            make_preview(pdf, cache / f"{artifact}.png")
+            os.replace(pdf, cache / f"{artifact}.pdf")
             result = {
-                "key": key, "signature": signature(project, panel, rect, context), "state": "fresh",
-                "interpreter_stamp": [path, Path(path).stat().st_mtime_ns],
+                "key": artifact, "signature": signature(project, panel, rect, context), "state": "fresh",
+                "interpreter_stamp": [path, stamp],
                 "stdout": stdout, "stderr": stderr, "seconds": monotonic() - started,
                 "warnings": ["Script contains an absolute path."] if ABSOLUTE_PATH.search(panel.script) else [],
-                "metadata": parsed,
+                "metadata": parsed, "runtime": runtime,
             }
             if fitted:
                 result["warnings"].append("Content was scaled to fit the panel. Enlarge the panel to keep the requested font sizes.")
@@ -261,7 +315,8 @@ def prepare_script(project, panel, rect, workspace, bundle, context=None, *, mat
         yield ScriptJob(key, command, cwd, env, project.timeout_s), finish
 
 
-def render_script(project, panel, rect, workspace, bundle, context=None, *, matplotlib_cache=None):
+def render_script(project, panel, rect, workspace, bundle, context=None, *,
+                  matplotlib_cache=None, data_root=None, force=False):
     with prepare_script(project, panel, rect, workspace, bundle, context,
-                        matplotlib_cache=matplotlib_cache) as (job, finish):
+                        matplotlib_cache=matplotlib_cache, data_root=data_root, force=force) as (job, finish):
         return job if finish is None else finish(job.run())

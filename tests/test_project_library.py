@@ -18,12 +18,17 @@ class ProjectLibrary(unittest.TestCase):
             state["project"]["name"] = "Local figure"
             session.action("/api/project", state["project"])
             session.action("/api/layout", {"kind": "add", "type": "script-py", "name": "Plot"})
+            local_data = workspaces / "data"
+            local_data.mkdir()
+            session.action("/api/local-data-folder", {"path": str(local_data)})
             self.assertEqual(project_library(workspaces)[0]["panels"], 1)
 
             reopened = Session(workspaces=workspaces)
             state = reopened.action("/api/resume", {"workspace": workspace})
             self.assertEqual(state["project"]["name"], "Local figure")
             self.assertEqual(state["project"]["panels"][0]["name"], "Plot")
+            self.assertEqual(state["data_root_override"], str(local_data.resolve()))
+            self.assertEqual(state["project"]["data_root"], "")
             self.assertFalse(state["bundle"])
             with self.assertRaisesRegex(ValueError, "Invalid workspace"):
                 reopened.action("/api/resume", {"workspace": "../other"})

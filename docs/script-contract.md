@@ -51,4 +51,6 @@ R CMD INSTALL ./helpers/r/plate
 
 The helpers load their default context when no style file is configured. To reproduce a style outside Plate, choose **Runtime → Export style JSON**, then run with `PLATE_STYLE=/path/to/plate-style.json`. The exported context contains the figure size. Set its `size_mm` to the standalone panel's content dimensions where needed. Standalone scripts manage their own devices and may apply the helper values explicitly.
 
-A data or library change that leaves the script identical can leave its prior result cached. Add a descriptive comment to the script to establish a new cache key when a data revision should trigger a fresh render.
+Declare file inputs in **Source → Render inputs** or in a script panel’s `input_files` array in the CLI specification. Use paths relative to the active data folder so the same declarations work on other machines. List referenced data files and any local helper scripts they depend on. Python workers can import modules from the data folder. R workers can use relative `source()` paths. Plate fingerprints the contents and renders affected panels again when a declared input changes. A missing or unreadable input produces a render error.
+
+Use **Force render** or the CLI’s `--force` flag when inputs cannot be represented as files or when you change plotting packages.

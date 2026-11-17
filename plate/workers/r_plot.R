@@ -221,4 +221,9 @@ tryCatch({
 }, finally = {
   if (device %in% grDevices::dev.list()) invisible(grDevices::dev.off(device))
 })
-jsonlite::write_json(list(axes = axes), metadata, auto_unbox = TRUE, digits = 12)
+packages <- sort(loadedNamespaces())
+versions <- vapply(packages, function(pkg) {
+  if (pkg == "base") as.character(getRversion()) else as.character(getNamespaceVersion(pkg))
+}, character(1))
+runtime <- list(version = as.character(getRversion()), packages = as.list(stats::setNames(versions, packages)))
+jsonlite::write_json(list(axes = axes, runtime = runtime), metadata, auto_unbox = TRUE, digits = 12)

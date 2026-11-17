@@ -108,6 +108,7 @@
         <button id="script-menu" popovertarget="script-actions">More</button>
         <div id="script-actions" class="popover" popover>
           <button id="dependencies">Check dependencies</button>
+          <button id="force-render">Force render</button>
           <button id="reveal-script">Show script in Finder</button>
           <button id="save-script">Save script</button>
         </div>
@@ -162,8 +163,20 @@
     </div>
     <label class="field">Save to<input id="export-path" name="export-path" required placeholder="/path/to/figure.pdf" autocomplete="off" spellcheck="false"></label>
     <button id="export-warnings" class="warning-link" type="button" hidden></button>
+    <div id="export-incomplete" hidden>
+      <p>These panels need attention before a complete export.</p>
+      <ul id="export-issues"></ul>
+      <label class="field checkbox"><input id="export-draft" type="checkbox">Export draft with these issues</label>
+    </div>
     <p id="export-error" class="form-error" role="status" hidden></p>
-    <div class="dialog-actions"><button type="button" id="cancel-export">Cancel</button><button type="submit" class="primary">Export</button></div>
+    <div class="dialog-actions"><button type="button" id="cancel-export">Cancel</button><button id="submit-export" type="submit" class="primary">Export</button></div>
+  </form>
+</dialog>
+<dialog id="environment-dialog" aria-labelledby="environment-title">
+  <form method="dialog">
+    <h2 id="environment-title">Render environment</h2>
+    <div id="environment-report" aria-live="polite"></div>
+    <div class="dialog-actions"><button type="submit" class="primary">Done</button></div>
   </form>
 </dialog>
 <script type="module">

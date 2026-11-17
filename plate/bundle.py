@@ -13,6 +13,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from .model import SCHEMA_VERSION, SCRIPT_EXTENSIONS, new_id, project_from_dict
 
 SAFE_ID = re.compile(r"[A-Za-z0-9_-]{1,80}\Z")
+PROVENANCE_FILE = "provenance.json"
 ASSET_EXTENSIONS = {
     "image": {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp"},
     "vector": {".pdf", ".svg"},
@@ -148,9 +149,11 @@ def open_bundle(path, workspaces):
     return project, workspace
 
 
-def save_bundle(project, workspace, path, include_cache=False, write_scripts=True):
+def save_bundle(project, workspace, path, include_cache=False, write_scripts=True, *, provenance=None):
     write_workspace(project, workspace, write_scripts=write_scripts)
     files = [workspace / f"{key}.json" for key in ("manifest", "layout", "style", "palettes")]
+    if provenance is None and (workspace / PROVENANCE_FILE).is_file():
+        files.append(workspace / PROVENANCE_FILE)
     for panel in project.panels:
         files.append(workspace / "panels" / panel.id / "panel.json")
         if panel.type in SCRIPT_EXTENSIONS:
@@ -164,5 +167,7 @@ def save_bundle(project, workspace, path, include_cache=False, write_scripts=Tru
         with ZipFile(temporary, "w", ZIP_DEFLATED) as archive:
             for file in dict.fromkeys(files):
                 archive.write(file, file.relative_to(workspace))
+            if provenance is not None:
+                archive.writestr(PROVENANCE_FILE, json.dumps(provenance, indent=2, ensure_ascii=False) + "\n")
 
     atomic_write(path, pack)

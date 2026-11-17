@@ -17,10 +17,8 @@ DIRECTORIES = (
 )
 
 
-@lru_cache(maxsize=1)
-def font_index():
-    index = {}
-    for root in DIRECTORIES:
+def font_records(directories):
+    for root in directories:
         for path in sorted(root.rglob("*")):
             suffix = path.suffix.lower()
             if suffix not in {".ttf", ".otf", ".ttc"}:
@@ -28,17 +26,55 @@ def font_index():
             try:
                 collection = TTCollection(path, lazy=True) if suffix == ".ttc" else None
                 fonts = collection.fonts if collection else [TTFont(path, lazy=True)]
-                for number, font in enumerate(fonts):
-                    names = font["name"]
-                    family = font_key(names.getBestFamilyName() or path.stem)
-                    style = (names.getBestSubFamilyName() or "").lower()
-                    if style in {"regular", "normal", "book", "roman", "bold"}:
-                        index.setdefault((family, style == "bold"), (path, number))
-                for font in fonts:
-                    font.close()
+                try:
+                    for number, font in enumerate(fonts):
+                        names = font["name"]
+                        yield path, number, names
+                finally:
+                    for font in fonts:
+                        font.close()
             except (OSError, KeyError, ValueError, TTLibError):
                 continue
+
+
+@lru_cache(maxsize=1)
+def font_index():
+    index = {}
+    for path, number, names in font_records(DIRECTORIES):
+        family = font_key(names.getBestFamilyName() or path.stem)
+        style = (names.getBestSubFamilyName() or "").lower()
+        if style in {"regular", "normal", "book", "roman", "bold"}:
+            index.setdefault((family, style == "bold"), (path, number))
     return index
+
+
+def face_key(name):
+    return re.sub(r"[^a-z0-9]", "", re.sub(r"^[A-Z]{6}\+", "", name).lower())
+
+
+def font_versions(directories):
+    versions = {}
+    for _, _, names in font_records(directories):
+        for name in (names.getDebugName(6), names.getBestFullName()):
+            if name:
+                versions.setdefault(face_key(name), names.getDebugName(5) or "")
+    return versions
+
+
+def pdf_font_versions(document, page):
+    versions = {}
+    for xref, _, _, name, *_ in page.get_fonts():
+        name = re.sub(r"^[A-Z]{6}\+", "", name)
+        versions.setdefault(name, "")
+        try:
+            _, _, _, data = document.extract_font(xref)
+            if not data:
+                continue
+            with TTFont(BytesIO(data), lazy=True) as font:
+                versions[name] = font["name"].getDebugName(5) or ""
+        except (OSError, KeyError, ValueError, RuntimeError, TTLibError):
+            continue
+    return versions
 
 
 @lru_cache(maxsize=64)

@@ -442,6 +442,14 @@ dialog::backdrop { background: var(--black-a5); }
 dialog h2 { font-size: var(--heading); margin-bottom: 16px; }
 dialog p { margin-bottom: 12px; }
 .dialog-actions { display: flex; justify-content: end; gap: 8px; margin-top: 16px; }
+#export-issues, #environment-report {
+  max-height: min(50vh, 340px);
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+#export-issues, #environment-report ul { padding-inline-start: 20px; }
+#environment-report details { margin-block: 8px; }
+#environment-report details p { white-space: pre-line; margin: 6px 0; }
 .form-error, .warning-link { color: var(--red-11); font-size: var(--small); overflow-wrap: anywhere; }
 .warning-link { color: var(--amber-12); background: var(--amber-3); border-color: transparent; }
 

@@ -13,7 +13,7 @@ from .bundle import import_asset
 from .export import DPIS, FORMATS
 from .model import SCRIPT_EXTENSIONS, project_from_dict
 from .render import data_directory
-from .server import Session
+from .server import IncompleteExport, Session
 
 COMMANDS = ("build", "apply", "inspect", "export")
 SPEC_FIELDS = {"name", "size", "style", "palettes", "groups", "alignment", "interpreters",
@@ -115,6 +115,7 @@ def summary(state):
                if state["renders"][panel["id"]]["state"] == "error" and key in state["renders"][panel["id"]]},
         } for panel in project["panels"]],
         "checks": state["checks"],
+        "export_issues": state["export_issues"],
     }
 
 
@@ -125,21 +126,30 @@ def execute(options, workspaces):
         if format not in FORMATS:
             raise ValueError("The output path must end in .pdf, .png or .tiff.")
     session = Session(getattr(options, "bundle", None), workspaces)
+    if getattr(options, "data_root", None) is not None:
+        session.remap_data_folder(str(options.data_root.expanduser().resolve()))
     if command in {"build", "apply"}:
         output = options.output.expanduser().resolve()
         if output.suffix.lower() != ".plate":
             raise ValueError("The project output path must end in .plate.")
         update_project(session, options.spec, output)
     if command == "inspect":
-        return {"ok": True, **summary(session.state())}
+        result = {"ok": True, **summary(session.state()), "provenance": session.current_provenance(prefer_saved=True)}
+        if options.compare_environment:
+            result["environment"] = session.environment_report()
+        return result
 
-    session.refresh_pending()
+    session.refresh_pending(force=options.force)
     result = summary(session.state())
-    if any(panel["state"] in {"stale", "error"} for panel in result["panels"]):
+    if command != "export" and any(panel["state"] in {"stale", "error"} for panel in result["panels"]):
         return {"ok": False, "error": "Some panels could not render.", **result}
     if command == "export":
-        result["export"] = session.export({"path": str(options.output), "format": format,
-                                           "dpi": options.dpi})["path"]
+        try:
+            exported = session.export({"path": str(options.output), "format": format,
+                                       "dpi": options.dpi, "draft": options.draft})
+        except IncompleteExport as error:
+            return {**result, "ok": False, "error": str(error), "export_issues": error.issues}
+        result.update(export=exported["path"], draft=exported["draft"], export_issues=exported["export_issues"])
     else:
         session.save(output, cache=True)
         result["bundle"] = str(output)
@@ -156,11 +166,18 @@ def main(argv):
     apply.add_argument("bundle", type=Path)
     apply.add_argument("spec", type=Path)
     apply.add_argument("--output", required=True, type=Path)
-    commands.add_parser("inspect", help="Read panel geometry, render states and checks.").add_argument("bundle", type=Path)
+    inspect = commands.add_parser("inspect", help="Read geometry, render states, checks and recorded provenance.")
+    inspect.add_argument("bundle", type=Path)
+    inspect.add_argument("--compare-environment", action="store_true", help="Compare saved and local render environments.")
     export = commands.add_parser("export", help="Refresh the bundle and export PDF, PNG or TIFF.")
     export.add_argument("bundle", type=Path)
     export.add_argument("--output", required=True, type=Path)
     export.add_argument("--dpi", type=int, choices=DPIS, default=300)
+    export.add_argument("--draft", action="store_true", help="Allow previous or missing artwork and list affected panels.")
+    for command in (build, apply, export):
+        command.add_argument("--force", action="store_true", help="Rerun scripts even when their cached renders match.")
+    for command in (inspect, export):
+        command.add_argument("--data-root", type=Path, help="Use a local data folder for this invocation.")
     options = parser.parse_args(argv)
     if hasattr(options, "bundle"):
         options.bundle = options.bundle.expanduser()

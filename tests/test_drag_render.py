@@ -62,6 +62,7 @@ class GridLayout(unittest.TestCase):
             bundle = root / "grid.plate"
             save_bundle(deleted, root / "working", bundle)
             session = Session(bundle, root / "open")
+            session.refresh_pending()
             result = session.export({"path": str(root / "figure.pdf"), "format": "pdf"})
             with pymupdf.open(result["path"]) as pdf:
                 self.assertEqual(pdf[0].get_text().split(), ["e", "a", "c", "d", "f"])
