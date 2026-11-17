@@ -11,8 +11,10 @@ import json
 import logging
 import mimetypes
 import os
+import shutil
 import subprocess
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from threading import Lock, RLock
 from time import time
 from urllib.parse import urlsplit
@@ -20,13 +22,13 @@ from zipfile import BadZipFile
 
 from .alignment import dependency_signature, fixed_axes, participating, validate_groups
 from .bundle import (
-    PROVENANCE_FILE, SAFE_ID, asset_path, atomic_write, import_asset, open_bundle, read_workspace, save_bundle, script_path,
-    write_json, write_workspace,
+    DATA_FOLDER, PROVENANCE_FILE, SAFE_ID, asset_path, atomic_write, declared_data_files, import_asset,
+    open_bundle, read_workspace, save_bundle, script_path, write_json, write_workspace,
 )
 from .checks import project_checks
 from .grid import apply_grid, as_grid, fit_artboard, is_grid, validate_panel_groups
 from .layout import Layout
-from .model import Project, SCRIPT_EXTENSIONS, project_from_dict, presets
+from .model import Project, SCRIPT_EXTENSIONS, new_id, project_from_dict, presets
 from .export import FORMATS, compose_pdf, rasterize
 from .native import native_signature, render_native
 from .fonts import label_metrics
@@ -58,6 +60,8 @@ def workspace_record(workspace):
 
 
 def project_digest(project):
+    if isinstance(project, dict) and project.get("embedded_data") is False:
+        project = {key: value for key, value in project.items() if key != "embedded_data"}
     return sha256(json.dumps(project, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
@@ -403,7 +407,7 @@ class Session:
             new_root = data_directory(project, self.workspace, path).resolve()
             if new_root != original:
                 root = os.path.relpath(original, path.parent)
-                project = replace(project, data_root="" if root == "." else root)
+                project = replace(project, data_root=root if root != "." or project.embedded_data else "")
         provenance = self.current_provenance()
         write_json(self.workspace / "cache/index.json", self.renders)
         save_bundle(project, self.workspace, path, cache, write_scripts=False, provenance=provenance)
@@ -413,6 +417,51 @@ class Session:
         self.keep_cache = bool(cache)
         self.saved_digest = project_digest(asdict(self.project))
         self.remember_workspace()
+
+    def share(self, path, *, cache=False):
+        path = Path(path).expanduser().with_suffix(".plate").resolve()
+        inputs = declared_data_files(self.project, self.data_folder(), required=True)
+        if path == self.bundle or path in inputs.values():
+            raise ValueError("Choose a new path for the shareable copy.")
+
+        project = replace(self.project, id=new_id(), data_root="", embedded_data=True, interpreters={},
+                          panels=[replace(panel, interpreter="") for panel in self.project.panels])
+        provenance = self.current_provenance()
+        for panel_id, environment in provenance.items():
+            if "interpreter" in environment:
+                provenance[panel_id] = {**environment,
+                                        "interpreter": Path(environment["interpreter"]).name}
+        with TemporaryDirectory(dir=self.workspace) as scratch:
+            workspace = Path(scratch)
+            for relative, source in inputs.items():
+                target = workspace / DATA_FOLDER / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+            for asset in {panel.asset for panel in project.panels if panel.asset}:
+                target = asset_path(workspace, asset)
+                target.parent.mkdir(exist_ok=True)
+                shutil.copyfile(asset_path(self.workspace, asset), target)
+            if cache:
+                self.copy_current_previews(workspace)
+            save_bundle(project, workspace, path, cache, provenance=provenance)
+        return {"path": str(path)}
+
+    def copy_current_previews(self, workspace):
+        rects = Layout(self.project).rects
+        renders = {}
+        for panel in self.project.panels:
+            render = self.render_state(panel, rects[panel.id], rects)
+            pdf = self.render_pdf(render)
+            if render["state"] != "fresh" or not pdf or not pdf.with_suffix(".png").is_file():
+                continue
+            for source in (pdf, pdf.with_suffix(".png")):
+                target = workspace / "cache" / source.name
+                target.parent.mkdir(exist_ok=True)
+                shutil.copyfile(source, target)
+            renders[panel.id] = {key: render[key] for key in ("key", "signature", "metadata")}
+            renders[panel.id]["state"] = "stale" if panel.type in SCRIPT_EXTENSIONS else "fresh"
+        if renders:
+            write_json(workspace / "cache/index.json", renders)
 
     def current_provenance(self, *, prefer_saved=False):
         state = self.state()
@@ -553,6 +602,8 @@ class Session:
             self.remap_data_folder(data["path"])
             self.remember_workspace()
             return self.state()
+        if endpoint == "/api/share":
+            return self.share(data["path"], cache=data.get("cache") is True)
         if endpoint == "/api/interpreters":
             return discovery(data.get("venvs", []))
         if endpoint == "/api/dependencies":

@@ -54,6 +54,7 @@ class Project:
     layout: dict | None = None
     interpreters: dict = field(default_factory=dict)
     data_root: str = ""
+    embedded_data: bool = False
     timeout_s: float = 60
     alignment: list[dict] = field(default_factory=list)
     groups: list[dict] = field(default_factory=list)

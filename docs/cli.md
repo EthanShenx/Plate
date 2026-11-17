@@ -17,7 +17,7 @@ Use `--force` with build, apply or export to rerun scripts even when their cache
 
 ## Figure specification
 
-Coordinates use millimetres from the upper left of the artboard. The order of panels establishes their stacking order. Script, asset and data paths are relative to the specification file. Panel scripts and imported images or vectors are stored in the bundle. External data read by scripts stays at its source location.
+Coordinates use millimetres from the upper left of the artboard. The order of panels establishes their stacking order. Script, asset and data paths are relative to the specification file. Panel scripts and imported images or vectors are stored in the bundle. When you apply a patch to a shareable copy, Plate keeps using its bundled data unless you specify a different data root.
 
 ```json
 {

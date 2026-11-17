@@ -56,7 +56,9 @@ To start from scratch, choose **New project** and **Add panel**. You can mix R a
 
 ## Share a figure
 
-A `.plate` file carries the layout, styles, scripts, and imported artwork. Share external data separately and set **Local data folder** when it lives somewhere different on another Mac. Use **Compare render environment** to check the interpreter, package, and font details saved with the figure.
+Choose **File → Save shareable copy…** and send the resulting `.plate` file. The recipient opens it in Plate and can edit the layout, scripts, and styles. Imported artwork and the data files and helpers listed under each script panel’s **Source → Render inputs** travel with the copy. Use paths relative to the data folder in both your scripts and the input list.
+
+The recipient uses their own R and Python installations. **Compare render environment** shows which versions, packages, and fonts the sender used. To edit bundled input files directly, choose **File → Show workspace in Finder** and open the `data` folder. You can also point Plate to a different folder under **Figure settings → Advanced → Local data folder**.
 
 Plate runs locally and opens plotting scripts with your permissions. Use scripts and bundles from sources you trust.
 

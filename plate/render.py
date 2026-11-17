@@ -19,7 +19,7 @@ from threading import Lock
 from time import monotonic
 from uuid import uuid4
 
-from .bundle import SAFE_ID, script_path, write_json, atomic_write
+from .bundle import DATA_FOLDER, SAFE_ID, script_path, write_json, atomic_write
 from .checks import text_collisions
 from .fonts import pdf_font_versions
 from .interpreters import interpreter, login_path, probe
@@ -201,6 +201,8 @@ def data_directory(project, workspace, bundle, override=None):
     if project.data_root:
         root = Path(project.data_root).expanduser()
         return root if root.is_absolute() else (bundle.parent if bundle else workspace) / root
+    if project.embedded_data:
+        return workspace / DATA_FOLDER
     return bundle.parent if bundle else workspace
 
 

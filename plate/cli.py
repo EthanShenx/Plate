@@ -43,12 +43,14 @@ def update_project(session, spec_path, output):
     if "grid_mm" in spec:
         data["layout"]["step_mm"] = spec["grid_mm"]
 
-    if session.bundle is None or "data_root" in spec:
-        data_root = relative_to(folder, spec.get("data_root", ""))
-    else:
-        data_root = data_directory(session.project, session.workspace, session.bundle).resolve()
-    relative_root = os.path.relpath(data_root, output.parent)
-    data["data_root"] = "" if relative_root == "." else relative_root
+    using_embedded_data = session.project.embedded_data and not session.project.data_root
+    if "data_root" in spec or not using_embedded_data:
+        if session.bundle is None or "data_root" in spec:
+            data_root = relative_to(folder, spec.get("data_root", ""))
+        else:
+            data_root = data_directory(session.project, session.workspace, session.bundle).resolve()
+        relative_root = os.path.relpath(data_root, output.parent)
+        data["data_root"] = relative_root if relative_root != "." or session.project.embedded_data else ""
 
     panels = {panel["id"]: panel for panel in data["panels"]}
     removing = spec.get("remove_panels", [])

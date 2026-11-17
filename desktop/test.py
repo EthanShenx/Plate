@@ -1,6 +1,7 @@
 """Run the desktop smoke test in a temporary workspace using real WKWebView."""
 
 from argparse import ArgumentParser
+import json
 import os
 from pathlib import Path
 import shutil
@@ -31,6 +32,8 @@ def main():
                             "PLATE_SMOKE_FIXTURE": str(fixture), "PLATE_SMOKE_SOAK": str(args.soak_seconds)})
         with ZipFile(directory / "Saved.plate") as saved:
             assert "provenance.json" in saved.namelist()
+        with ZipFile(directory / "Shared.plate") as shared:
+            assert json.loads(shared.read("manifest.json"))["embedded_data"] is True
         with pymupdf.open(directory / "Desktop.pdf") as pdf:
             assert pdf.page_count == 1
             assert "Cortex" in pdf[0].get_text()

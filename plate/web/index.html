@@ -33,6 +33,7 @@
       <button id="new">New project</button>
       <button id="open">Open project…</button>
       <button id="save-as">Save as…</button>
+      <button id="share-copy">Save shareable copy…</button>
       <button id="project-folder">Show workspace in Finder</button>
     </div>
     <button id="save" class="quiet" aria-keyshortcuts="Meta+S Control+S"><svg class="icon" aria-hidden="true"><use href="./icons.svg#save"/></svg>Save</button>
@@ -150,6 +151,11 @@
       <label class="field">Project path<input id="bundle-path" name="project-path" required placeholder="/path/to/figure.plate" autocomplete="off" spellcheck="false"></label>
       <button id="browse-bundle" type="button" hidden>Choose…</button>
     </div>
+    <p id="share-inputs-note" hidden></p>
+    <details id="share-inputs" hidden>
+      <summary>Included data and helpers</summary>
+      <ul id="share-input-files"></ul>
+    </details>
     <label class="field checkbox"><input id="bundle-cache" name="include-previews" type="checkbox">Include rendered previews</label>
     <p id="save-error" class="form-error" role="status" hidden></p>
     <div class="dialog-actions"><button type="button" id="cancel-save">Cancel</button><button type="submit" class="primary">Save</button></div>

@@ -14,6 +14,7 @@ from .model import SCHEMA_VERSION, SCRIPT_EXTENSIONS, new_id, project_from_dict
 
 SAFE_ID = re.compile(r"[A-Za-z0-9_-]{1,80}\Z")
 PROVENANCE_FILE = "provenance.json"
+DATA_FOLDER = "data"
 ASSET_EXTENSIONS = {
     "image": {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp"},
     "vector": {".pdf", ".svg"},
@@ -49,6 +50,8 @@ def write_workspace(project, workspace, write_scripts=True):
     if not SAFE_ID.fullmatch(project.id):
         raise ValueError("Invalid project identifier.")
     data = asdict(project)
+    if not data["embedded_data"]:
+        del data["embedded_data"]
     for key in ("layout", "style", "palettes"):
         write_json(workspace / f"{key}.json", data.pop(key))
     for panel, record in zip(project.panels, data.pop("panels"), strict=True):
@@ -95,6 +98,29 @@ def import_asset(workspace, kind, path):
     return asset
 
 
+def declared_data_files(project, directory, *, required):
+    root = directory.resolve()
+    files = {}
+    for declared in dict.fromkeys(path for panel in project.panels for path in panel.input_files):
+        relative = PurePosixPath(declared)
+        if (relative.is_absolute() or not relative.parts or ".." in relative.parts
+                or declared.startswith("~") or "\\" in declared or ":" in declared):
+            if required:
+                raise ValueError(f"Use a path relative to the data folder for input “{declared}”.")
+            continue
+        try:
+            source = (root / relative).resolve()
+            available = source.is_relative_to(root) and source.is_file()
+        except (OSError, RuntimeError):
+            available = False
+        if not available:
+            if required:
+                raise ValueError(f"Input “{declared}” must be a file inside the data folder.")
+            continue
+        files[relative] = source
+    return files
+
+
 def read_workspace(workspace):
     def read(path):
         return json.loads(path.read_text(encoding="utf-8"))
@@ -120,6 +146,8 @@ def read_workspace(workspace):
         path = workspace / f"{key}.json"
         if path.exists():
             manifest[key] = read(path)
+    if manifest.get("embedded_data"):
+        (workspace / DATA_FOLDER).mkdir(exist_ok=True)
     return project_from_dict(manifest)
 
 
@@ -167,6 +195,10 @@ def save_bundle(project, workspace, path, include_cache=False, write_scripts=Tru
         with ZipFile(temporary, "w", ZIP_DEFLATED) as archive:
             for file in dict.fromkeys(files):
                 archive.write(file, file.relative_to(workspace))
+            if project.embedded_data:
+                for relative, source in declared_data_files(
+                        project, workspace / DATA_FOLDER, required=False).items():
+                    archive.write(source, PurePosixPath(DATA_FOLDER) / relative)
             if provenance is not None:
                 archive.writestr(PROVENANCE_FILE, json.dumps(provenance, indent=2, ensure_ascii=False) + "\n")
 

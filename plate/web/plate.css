@@ -474,12 +474,13 @@ dialog p { margin-bottom: 12px; }
 }
 [data-desktop][data-appearance="dark"] #frame { background: white; }
 [data-desktop][data-appearance="dark"] .primary { color: #252025; }
-#export-issues, #environment-report {
+#export-issues, #share-input-files, #environment-report {
   max-height: min(50vh, 340px);
   overflow: auto;
   overflow-wrap: anywhere;
 }
-#export-issues, #environment-report ul { padding-inline-start: 20px; }
+#export-issues, #share-input-files, #environment-report ul { padding-inline-start: 20px; }
+#share-inputs { margin-bottom: 10px; }
 #environment-report details { margin-block: 8px; }
 #environment-report details p { white-space: pre-line; margin: 6px 0; }
 .form-error, .warning-link { color: var(--red-11); font-size: var(--small); overflow-wrap: anywhere; }

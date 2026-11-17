@@ -446,6 +446,7 @@ final class PlateApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavig
         file.addItem(.separator())
         command(file, "Save", "save", "s")
         command(file, "Save As…", "saveAs", "s", shift: true)
+        command(file, "Save Shareable Copy…", "shareCopy", "")
         command(file, "Export…", "export", "e")
         file.addItem(.separator())
         entry(file, "Close Window", #selector(NSWindow.performClose(_:)), "w", firstResponder: true)

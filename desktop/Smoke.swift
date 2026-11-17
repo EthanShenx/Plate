@@ -174,6 +174,30 @@ extension PlateApp {
             document.querySelector("#save-form button[type=submit]").click();
             """, ["path": saved.path])
         try await waitFor("the saved bundle") { FileManager.default.fileExists(atPath: saved.path) }
+        try await waitFor("the save dialog to close") {
+            try await js("return !document.querySelector('#save-dialog').open") as? Bool == true
+        }
+
+        try menu("File", "Save Shareable Copy…")
+        try await waitFor("the shareable copy dialog") {
+            try await js("""
+                return document.querySelector("#save-dialog").open &&
+                    document.querySelector("#save-title").textContent === "Save shareable copy";
+                """) as? Bool == true
+        }
+        let shared = fixture.deletingLastPathComponent().appendingPathComponent("Shared.plate")
+        _ = try await js("""
+            document.querySelector("#bundle-path").value = path;
+            document.querySelector("#save-form button[type=submit]").click();
+            """, ["path": shared.path])
+        try await waitFor("the shareable copy to save") {
+            try await js("""
+                const data = await fetch("/api/project").then(r => r.json());
+                return !document.querySelector("#save-dialog").open &&
+                    document.querySelector("#status").textContent.includes("Saved shareable copy") &&
+                    data.bundle.endsWith("/Saved.plate");
+                """) as? Bool == true
+        }
 
         try menu("File", "Export…")
         try await waitFor("the export dialog") {

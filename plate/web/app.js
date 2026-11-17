@@ -2288,14 +2288,31 @@ async function saveAllDrafts() {
 }
 
 const saveDialog = $("#save-dialog");
-function showSaveDialog() {
+let sharingCopy = false;
+function showSaveDialog(share = false) {
   if (!state || (busy && !automaticRefresh)) return;
-  $("#bundle-path").value = state.bundle;
-  $("#bundle-cache").checked = Boolean(state.keep_cache);
+  sharingCopy = share;
+  $("#save-title").textContent = share ? "Save shareable copy" : "Save project";
+  $("#save-form button[type=submit]").textContent = share ? "Save copy" : "Save";
+  $("#bundle-path").value = share ? "" : state.bundle;
+  $("#bundle-cache").checked = share || Boolean(state.keep_cache);
+  const inputs = share ? [...new Set(state.project.panels.flatMap(panel => panel.input_files))] : [];
+  $("#share-inputs-note").hidden = !share;
+  $("#share-inputs-note").textContent = inputs.length
+    ? "The copy includes the files listed in Render inputs. Use relative paths in your scripts."
+    : "List any data files your scripts need under Source → Render inputs to include them in the copy.";
+  $("#share-inputs").hidden = !inputs.length;
+  $("#share-inputs").open = false;
+  $("#share-input-files").replaceChildren(...inputs.map(path => {
+    const item = document.createElement("li");
+    item.textContent = path;
+    return item;
+  }));
   formError("#save-error");
   saveDialog.showModal();
 }
-$("#save-as").onclick = showSaveDialog;
+$("#save-as").onclick = () => showSaveDialog();
+$("#share-copy").onclick = () => showSaveDialog(true);
 $("#save").onclick = async () => {
   if (!state || (busy && !automaticRefresh)) return;
   if (!state.bundle) return showSaveDialog();
@@ -2304,7 +2321,8 @@ $("#save").onclick = async () => {
 $("#cancel-save").onclick = () => saveDialog.close();
 $("#browse-bundle").onclick = async () => {
   const input = $("#bundle-path");
-  const path = await chooseDesktopPath("saveProject", input.value || state.project.name + ".plate");
+  const suggested = state.project.name + (sharingCopy ? "-shared.plate" : ".plate");
+  const path = await chooseDesktopPath("saveProject", input.value || suggested);
   if (path) input.value = path;
 };
 $("#save-form").onsubmit = async event => {
@@ -2313,12 +2331,25 @@ $("#save-form").onsubmit = async event => {
   submit.disabled = true;
   formError("#save-error");
   try {
-    if (await saveAllDrafts() &&
-        await action("save", { path: $("#bundle-path").value, cache: $("#bundle-cache").checked })) {
+    if ((pendingChange && !await pendingChange) || !await saveAllDrafts()) {
+      formError("#save-error", $("#status").textContent);
+      return;
+    }
+    const options = { path: $("#bundle-path").value, cache: $("#bundle-cache").checked };
+    if (sharingCopy) {
+      busy = true;
+      try {
+        const result = await request("/api/share", options);
+        saveDialog.close();
+        report("Saved shareable copy to " + result.path);
+      } finally { busy = false; }
+    } else if (await action("save", options)) {
       saveDialog.close();
     } else {
       formError("#save-error", $("#status").textContent);
     }
+  } catch (error) {
+    formError("#save-error", error.message);
   } finally {
     submit.disabled = false;
   }
@@ -2370,7 +2401,8 @@ if (desktop) {
     } else if (name === "new" || name === "open") {
       if (!$("dialog[open]")) $("#" + name).click();
     } else if (hasEditorProject) {
-      const target = { save: "#save", saveAs: "#save-as", export: "#export", refresh: "#refresh-all" }[name];
+      const target = { save: "#save", saveAs: "#save-as", shareCopy: "#share-copy",
+        export: "#export", refresh: "#refresh-all" }[name];
       if (target && !$("dialog[open]")) {
         if ($("#workspace").hidden) showEditor();
         $(target).click();
