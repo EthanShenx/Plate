@@ -17,6 +17,12 @@ let editor;
 let editorId;
 let editorOpen = false;
 let hasEditorProject = false;
+let library = { projects: [], tabs: [], active: null };
+const figureViews = new Map();
+let switchingFigure = false;
+let scriptSaveTimer;
+let idleScriptSave;
+let projectRename;
 let renderLibrary;
 let libraryLoad = 0;
 let interpreters = {};
@@ -71,9 +77,12 @@ function drawRenderFailure() {
   failure.hidden = !message;
 }
 
-async function request(path, body) {
+async function request(path, body, keepalive = false) {
   const response = await fetch(path, body === undefined ? {} : {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    method: "POST", headers: {
+      "Content-Type": "application/json",
+      ...(state ? { "X-Plate-Workspace": state.workspace_id } : {}),
+    }, body: JSON.stringify(body), keepalive,
   });
   const data = await response.json();
   if (!response.ok) {
@@ -639,7 +648,7 @@ function drawCanvas() {
     tile.querySelector(".tile-caption").textContent = panel.name;
     const render = state.renders[panel.id];
     const image = tile.querySelector(".plot-preview");
-    const src = render?.key ? `/preview/${render.key}` : "";
+    const src = render?.key ? `/preview/${state.workspace_id}/${render.key}` : "";
     if (src && image.getAttribute("src") !== src) image.src = src;
     image.hidden = !src;
     const rect = geometry.rects[panel.id];
@@ -1332,6 +1341,8 @@ function drawEditor(panel) {
     editor = createEditor($("#script-editor"), panel.type, draft.value, text => {
       draft.value = text;
       editorStatus(draft);
+      clearTimeout(scriptSaveTimer);
+      scriptSaveTimer = setTimeout(saveScriptsOnIdle, 700);
     });
   } else editor.replace(draft.value);
   editorStatus(draft);
@@ -1357,9 +1368,9 @@ function openEditor(id) {
   $("#script-editor :is(.cm-content, textarea)")?.focus();
 }
 
-async function saveDraft(panel) {
+async function saveDraft(panel, autosave = false) {
   if (busy || panelGesture) return false;
-  const draft = reconcileDraft(panel);
+  const draft = reconcileDraft(panel, !autosave);
   if (draft.value === draft.base) return true;
   busy = true;
   try {
@@ -1370,10 +1381,14 @@ async function saveDraft(panel) {
         draft.base = sent;
         state = result;
         draw();
-        scheduleRefresh();
+        if (!autosave) scheduleRefresh();
         return true;
       }
       panel.script = result.script;
+      if (autosave) {
+        report("Script changed on disk. Open the script to review both versions.");
+        return false;
+      }
       reconcileDraft(panel);
       if (draft.value === draft.base) {
         state = await request("/api/project");
@@ -1386,17 +1401,26 @@ async function saveDraft(panel) {
   finally { busy = false; }
 }
 
+async function saveScriptsOnIdle() {
+  if (busy || panelGesture || switchingFigure || pendingChange) {
+    scriptSaveTimer = setTimeout(saveScriptsOnIdle, 700);
+    return;
+  }
+  idleScriptSave = saveAllDrafts(true).finally(() => { idleScriptSave = null; });
+  await idleScriptSave;
+}
+
 async function pollScripts() {
   if (busy || panelGesture || !state) return;
   const previous = state;
   try {
     const result = await request("/api/scripts");
-    if (busy || panelGesture || state !== previous || result.id !== state.project.id) return;
+    if (busy || panelGesture || state !== previous || result.workspace_id !== state.workspace_id) return;
     const changed = state.project.panels.some(panel => isScript(panel) && result.scripts[panel.id] !== panel.script);
     const updatedInputs = result.stale_inputs.some(id => state.renders[id]?.state !== "stale");
     if (changed || updatedInputs) {
       const latest = await request("/api/project");
-      if (busy || panelGesture || state !== previous || latest.project.id !== state.project.id) return;
+      if (busy || panelGesture || state !== previous || latest.workspace_id !== state.workspace_id) return;
       state = latest;
       drawRenderState();
       scheduleRefresh();
@@ -1592,6 +1616,7 @@ function draw(updateStatus = true) {
     editorOpen = false;
   }
   $("#project-name").value = project.name;
+  drawFigureTabs();
   $("#measure").textContent = `${project.size.width_mm} × ${project.size.height_mm} mm`;
   $("#undo").disabled = !past.length;
   $("#redo").disabled = !future.length;
@@ -1724,20 +1749,138 @@ async function action(name, data = {}) {
   busy = true;
   try {
     state = await request(`/api/${name}`, data);
-    if (["new", "open", "resume"].includes(name)) {
-      selected = null; past = []; future = []; drafts.clear();
-      selectedGroup = null; multiSelection.clear(); selectedCheck = null;
-      editorOpen = false; showChecks = false;
-      $("#panel-handles").removeAttribute("data-panel");
-      showEditor();
-      findInterpreters();
+    if (state.library) library = state.library;
+    if (!switchingFigure) {
+      draw();
+      scheduleRefresh();
     }
-    draw();
-    scheduleRefresh();
     return true;
   }
   catch (error) { report(error.message); return false; }
   finally { busy = false; }
+}
+
+function currentProject() {
+  return library.projects.find(project => project.figures.some(figure => figure.id === library.active));
+}
+
+function drawFigureTabs() {
+  const figures = new Map(library.projects.flatMap(project => project.figures.map(figure => [figure.id, { figure, project }])));
+  const current = currentProject();
+  const figure = figures.get(state.workspace_id)?.figure;
+  if (figure) figure.name = state.project.name;
+  const names = new Map();
+  for (const id of library.tabs) {
+    const name = figures.get(id)?.figure.name;
+    names.set(name, (names.get(name) || 0) + 1);
+  }
+  $("#collection-name").value = current?.name || "";
+  $("#figure-strip").hidden = !library.tabs.length;
+  $("#new-figure").disabled = !current;
+  $("#project-figures").disabled = !current;
+  $("#move-figure").disabled = library.projects.length < 2;
+  const tabs = $("#figure-tabs");
+  const focus = tabs.contains(document.activeElement) ? document.activeElement.dataset.figure : null;
+  const scroll = tabs.scrollLeft;
+  tabs.replaceChildren(...library.tabs.flatMap(id => {
+    const entry = figures.get(id);
+    if (!entry) return [];
+    const { figure: item, project } = entry;
+    const active = library.active === id;
+    const label = names.get(item.name) > 1 ? `${item.name} · ${project.name}` : item.name;
+    const tab = button(label, () => switchFigure("resume", { workspace: id }));
+    tab.id = "figure-tab-" + id;
+    tab.dataset.figure = id;
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-selected", String(active));
+    tab.setAttribute("aria-controls", "workspace");
+    tab.tabIndex = active ? 0 : -1;
+    tab.title = `${project.name} / ${item.name}`;
+    if (active) $("#workspace").setAttribute("aria-labelledby", tab.id);
+    const close = button("", () => switchFigure("close-tab", { workspace: id }));
+    close.className = "icon-button quiet";
+    close.setAttribute("aria-label", "Close tab for " + label);
+    close.append(icon("close"));
+    const wrapper = document.createElement("div");
+    wrapper.className = "figure-tab";
+    wrapper.setAttribute("role", "presentation");
+    wrapper.append(tab, close);
+    return [wrapper];
+  }));
+  tabs.scrollLeft = scroll;
+  if (focus) document.getElementById("figure-tab-" + focus)?.focus({ preventScroll: true });
+  $("#figure-actions").replaceChildren(...(current?.figures || []).map(item =>
+    button(item.name, () => {
+      $("#figure-actions").hidePopover();
+      switchFigure("resume", { workspace: item.id });
+    })));
+}
+
+$("#figure-tabs").onkeydown = event => {
+  const tabs = [...$("#figure-tabs").querySelectorAll('[role="tab"]')];
+  const index = tabs.indexOf(event.target);
+  const next = {
+    ArrowLeft: (index + tabs.length - 1) % tabs.length, ArrowRight: (index + 1) % tabs.length,
+    Home: 0, End: tabs.length - 1,
+  }[event.key];
+  if (index < 0 || next === undefined) return;
+  event.preventDefault();
+  tabs[next].focus();
+};
+
+async function flushFigure() {
+  document.activeElement?.blur();
+  if (pendingChange && !await pendingChange) return false;
+  if (projectRename && !await projectRename) return false;
+  clearTimeout(scriptSaveTimer);
+  if (idleScriptSave) await idleScriptSave;
+  return !hasUnsavedScriptEdits() || await saveAllDrafts();
+}
+
+async function switchFigure(name, data = {}) {
+  if (!state || switchingFigure || panelGesture) return false;
+  switchingFigure = true;
+  try {
+    const focusTab = $("#figure-tabs").contains(document.activeElement);
+    if (!await flushFigure()) return false;
+    const previous = state.workspace_id;
+    if (!$("#workspace").hidden) {
+      figureViews.set(previous, { past, future, selected, selectedGroup, selectedCheck,
+        selectedPanels: [...multiSelection], zoom, viewMode, editorOpen, showChecks,
+        scrollLeft: viewport.scrollLeft, scrollTop: viewport.scrollTop });
+    }
+    if (!await action(name, data)) return false;
+    if (!library.active) {
+      hasEditorProject = false;
+      drawFigureTabs();
+      showHome();
+      return true;
+    }
+    if (previous !== state.workspace_id) {
+      const view = figureViews.get(state.workspace_id) || {};
+      past = view.past || []; future = view.future || [];
+      selected = view.selected ?? null; selectedGroup = view.selectedGroup ?? null;
+      selectedCheck = view.selectedCheck ?? null;
+      multiSelection.clear();
+      for (const id of view.selectedPanels || []) multiSelection.add(id);
+      zoom = view.zoom ?? 3.1; viewMode = view.viewMode || "fit";
+      editorOpen = Boolean(view.editorOpen); showChecks = Boolean(view.showChecks);
+      drafts.clear();
+      editor?.destroy();
+      editor = null; editorId = null;
+      $("#panel-handles").removeAttribute("data-panel");
+    }
+    showEditor(false);
+    draw();
+    const view = figureViews.get(state.workspace_id);
+    if (view && previous !== state.workspace_id) viewport.scrollTo(view.scrollLeft, view.scrollTop);
+    const tab = document.getElementById("figure-tab-" + library.active);
+    tab?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    if (focusTab) tab?.focus({ preventScroll: true });
+    scheduleRefresh();
+    findInterpreters();
+    return true;
+  } finally { switchingFigure = false; }
 }
 
 const projectModule = import("/vendor/projects.js").catch(() => null);
@@ -1747,14 +1890,11 @@ async function loadLibrary() {
   const container = $("#project-library");
   container.setAttribute("aria-busy", "true");
   try {
-    const [module, projects] = await Promise.all([projectModule, request("/api/projects")]);
+    const [module, result] = await Promise.all([projectModule, request("/api/projects")]);
     if (id !== libraryLoad) return;
     if (!module) throw new Error("The project browser is unavailable. Run make editor and reload Plate.");
-    renderLibrary ||= module.mountProjects(container, workspace => {
-      if (hasEditorProject && state.workspace_id === workspace) showEditor();
-      else if (canSwitchProject()) action("resume", { workspace });
-    });
-    renderLibrary(projects);
+    renderLibrary ||= module.mountProjects(container, workspace => switchFigure("resume", { workspace }));
+    renderLibrary(result.projects);
   } catch (error) {
     if (id !== libraryLoad) return;
     if (renderLibrary) report(error.message);
@@ -2247,10 +2387,6 @@ document.addEventListener("keydown", event => {
   if (event.shiftKey) refreshAll();
   else if (selected) refreshSelected();
 });
-function canSwitchProject() {
-  return !hasUnsavedScriptEdits() || confirm("Discard unsaved script edits in this project?");
-}
-
 $("#file-actions").addEventListener("click", event => {
   if (event.target.closest("button:enabled")) $("#file-actions").hidePopover();
 });
@@ -2259,30 +2395,56 @@ $("#project-folder").onclick = async () => {
   catch (error) { report(error.message); }
 };
 function newProject() {
-  if (state && (!busy || automaticRefresh || pendingChange) && canSwitchProject()) action("new");
+  switchFigure("new");
+}
+
+function newFigure() {
+  const project = currentProject();
+  if (project) switchFigure("new-figure", { project: project.id });
+}
+
+function openPath(path) {
+  const project = $("#workspace").hidden ? null : currentProject()?.id;
+  return switchFigure("open", { path, project });
 }
 
 async function openProject() {
   if (!state || busy && !automaticRefresh && !pendingChange) return;
   if (desktop) {
     const path = await chooseDesktopPath("openProject");
-    if (path && canSwitchProject()) await action("open", { path });
+    if (path) await openPath(path);
     return;
   }
-  askValue("Open project", "Path to a .plate file", "Open",
-    path => canSwitchProject() ? action("open", { path }) : undefined);
+  askValue("Open figure", "Path to a .plate file", "Open", openPath);
 }
 
 $("#home-button").onclick = () => showHome();
 $("#return-to-editor").onclick = () => showEditor();
 $("#new").onclick = $("#home-new").onclick = newProject;
 $("#open").onclick = $("#home-open").onclick = openProject;
-async function saveAllDrafts() {
+$("#new-figure").onclick = newFigure;
+const moveFigureDialog = $("#move-figure-dialog");
+$("#move-figure").onclick = () => {
+  const current = currentProject();
+  const projects = library.projects.filter(project => project !== current);
+  $("#move-figure-target").replaceChildren(...projects.map(project => new Option(project.name, project.id)));
+  formError("#move-figure-error");
+  moveFigureDialog.showModal();
+};
+$("#cancel-move-figure").onclick = () => moveFigureDialog.close();
+$("#move-figure-form").onsubmit = async event => {
+  event.preventDefault();
+  if (await action("move-figure", { project: $("#move-figure-target").value })) moveFigureDialog.close();
+  else formError("#move-figure-error", $("#status").textContent);
+};
+async function saveAllDrafts(autosave = false) {
   if (automaticRefresh) await automaticRefresh;
   if (busy) return false;
   for (const panel of state.project.panels.filter(isScript)) {
     const draft = drafts.get(panel.id);
-    if (draft && draft.value !== draft.base && !await saveDraft(panel)) return false;
+    while (draft && draft.value !== draft.base) {
+      if (!await saveDraft(panel, autosave)) return false;
+    }
   }
   return true;
 }
@@ -2292,7 +2454,7 @@ let sharingCopy = false;
 function showSaveDialog(share = false) {
   if (!state || (busy && !automaticRefresh)) return;
   sharingCopy = share;
-  $("#save-title").textContent = share ? "Save shareable copy" : "Save project";
+  $("#save-title").textContent = share ? "Save shareable copy" : "Save figure";
   $("#save-form button[type=submit]").textContent = share ? "Save copy" : "Save";
   $("#bundle-path").value = share ? "" : state.bundle;
   $("#bundle-cache").checked = share || Boolean(state.keep_cache);
@@ -2362,7 +2524,9 @@ document.addEventListener("keydown", event => {
   else $("#save").click();
 });
 window.addEventListener("beforeunload", event => {
-  if (!state || !hasUnsavedScriptEdits()) return;
+  if (!state) return;
+  document.activeElement?.blur();
+  if (!pendingChange && !projectRename && !hasUnsavedScriptEdits()) return;
   event.preventDefault();
   event.returnValue = "";
 });
@@ -2371,8 +2535,22 @@ window.addEventListener("pageshow", resumeVisibleWork);
 window.addEventListener("pagehide", () => {
   clearTimeout(pollTimer);
   clearTimeout(refreshTimer);
+  if (!desktop && state) {
+    for (const [panel, draft] of drafts) {
+      if (draft.value !== draft.base) {
+        request("/api/script", { panel, base: draft.base, script: draft.value }, true).catch(() => {});
+      }
+    }
+  }
 });
 $("#project-name").onchange = event => change(p => { p.name = event.target.value.trim() || "Untitled figure"; });
+$("#collection-name").onchange = event => {
+  const input = event.target;
+  projectRename = action("rename-project", { name: input.value.trim() }).then(saved => {
+    if (!saved) input.value = currentProject()?.name || "";
+    return saved;
+  }).finally(() => { projectRename = null; });
+};
 
 if (desktop) {
   document.documentElement.dataset.desktop = "";
@@ -2390,9 +2568,9 @@ if (desktop) {
     } else if (name === "appearance") {
       document.documentElement.dataset.appearance = value;
     } else if (name === "prepareQuit") {
-      return !hasUnsavedScriptEdits() || await saveAllDrafts();
+      return flushFigure();
     } else if (name === "openPath") {
-      return typeof value === "string" && canSwitchProject() && await action("open", { path: value });
+      return typeof value === "string" && await openPath(value);
     } else if (name === "undo" || name === "redo") {
       const input = document.activeElement;
       if ($("#script-editor").contains(input) && editor?.history) editor.history(name === "redo");
@@ -2401,7 +2579,7 @@ if (desktop) {
     } else if (name === "new" || name === "open") {
       if (!$("dialog[open]")) $("#" + name).click();
     } else if (hasEditorProject) {
-      const target = { save: "#save", saveAs: "#save-as", shareCopy: "#share-copy",
+      const target = { save: "#save", saveAs: "#save-as", shareCopy: "#share-copy", newFigure: "#new-figure",
         export: "#export", refresh: "#refresh-all" }[name];
       if (target && !$("dialog[open]")) {
         if ($("#workspace").hidden) showEditor();
@@ -2414,8 +2592,9 @@ if (desktop) {
 
 try {
   [state, journals] = await Promise.all([request("/api/project"), request("/api/presets")]);
+  library = state.library;
   $("#home-open").disabled = $("#home-new").disabled = false;
-  if (state.workspace_registered) showEditor(false);
+  if (library.active) showEditor(false);
   else showHome(false);
   draw();
   scheduleRefresh();

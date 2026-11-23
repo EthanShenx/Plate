@@ -381,7 +381,7 @@ final class PlateApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavig
             } else {
                 self.showWindow()
                 let alert = NSAlert()
-                alert.messageText = "Plate could not save your script edits."
+                alert.messageText = "Plate could not save your latest edits."
                 alert.addButton(withTitle: "Keep Plate Open")
                 alert.addButton(withTitle: "Quit Without Saving")
                 alert.beginSheetModal(for: self.window) { response in
@@ -442,6 +442,7 @@ final class PlateApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavig
         entry(app, "Quit Plate", #selector(NSApplication.terminate(_:)), "q", firstResponder: true)
         let file = section("File")
         command(file, "New Project", "new", "n")
+        command(file, "New Figure", "newFigure", "t")
         command(file, "Open…", "open", "o")
         file.addItem(.separator())
         command(file, "Save", "save", "s")

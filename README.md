@@ -54,6 +54,12 @@ Open [`examples/nature-double.plate`](examples/nature-double.plate) with **File 
 
 To start from scratch, choose **New project** and **Add panel**. You can mix R and Python scripts with images, PDF or SVG artwork, text, and legends.
 
+## Work on several figures
+
+Open a project and click **+** in the top tab bar to add a figure. Each figure has its own artboard. Click a tab to switch figures, or use **Figures** to reopen a closed tab. Click the project or figure name at the top to rename it.
+
+Plate saves edits to its local workspace as you work. On macOS, **⌘Q** saves pending edits before quitting. Reopen Plate to pick up where you left off, with the same tabs and active figure. Use **Save** when you want a `.plate` file for an individual figure.
+
 ## Share a figure
 
 Choose **File → Save shareable copy…** and send the resulting `.plate` file. The recipient opens it in Plate and can edit the layout, scripts, and styles. Imported artwork and the data files and helpers listed under each script panel’s **Source → Render inputs** travel with the copy. Use paths relative to the data folder in both your scripts and the input list.

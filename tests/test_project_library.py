@@ -3,10 +3,46 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from plate.bundle import open_bundle
-from plate.server import Session, project_library
+from plate.library import FigureLibrary
+from plate.server import PlateServer, Session, project_library
 
 
 class ProjectLibrary(unittest.TestCase):
+    def test_projects_keep_multiple_figures_and_restore_open_tabs(self):
+        with TemporaryDirectory() as folder:
+            workspaces = Path(folder)
+            server = object.__new__(PlateServer)
+            server.session = Session(workspaces=workspaces)
+            server.library = FigureLibrary(workspaces)
+
+            first = server.act("/api/new", {})
+            first_id = first["workspace_id"]
+            project = first["library"]["projects"][0]["id"]
+            server.act("/api/rename-project", {"name": "Paper revisions"})
+            server.act("/api/layout", {"kind": "add", "type": "text", "name": "First panel"})
+            second = server.act("/api/new-figure", {"project": project})
+            second_id = second["workspace_id"]
+            self.assertEqual(second["project"]["name"], "Figure 2")
+            self.assertEqual(second["library"]["tabs"], [first_id, second_id])
+            self.assertEqual(len(second["library"]["projects"]), 1)
+
+            closed = server.act("/api/close-tab", {"workspace": second_id})
+            self.assertEqual(closed["workspace_id"], first_id)
+            self.assertEqual(len(closed["project"]["panels"]), 1)
+            self.assertEqual(len(closed["library"]["projects"][0]["figures"]), 2)
+            server.act("/api/resume", {"workspace": second_id})
+
+            other = server.act("/api/new", {})
+            other_id = other["workspace_id"]
+            server.act("/api/move-figure", {"project": project})
+            stored = FigureLibrary(workspaces)
+            self.assertEqual(stored.active, other_id)
+            self.assertEqual(stored.tabs, [first_id, second_id, other_id])
+            self.assertEqual(stored.projects[project]["name"], "Paper revisions")
+            self.assertEqual(stored.projects[project]["figures"], [first_id, second_id, other_id])
+            resumed = Session(workspaces=workspaces, workspace=workspaces / first_id)
+            self.assertEqual(resumed.project.panels[0].name, "First panel")
+
     def test_local_draft_is_available_in_a_new_session(self):
         with TemporaryDirectory() as folder:
             workspaces = Path(folder)

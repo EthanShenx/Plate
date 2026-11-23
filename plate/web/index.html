@@ -17,13 +17,16 @@
   <pre><code>make run</code></pre>
 </main>
 <a class="skip-link" href="#home">Skip to content</a>
+<div class="workbench-header">
 <header class="toolbar">
   <button id="home-button" class="brand" title="Project home" translate="no">
     <img class="brand-mark" src="./plate-mark.svg" alt="">Plate
   </button>
   <div class="project-crumb" hidden>
     <svg class="icon" aria-hidden="true"><use href="./icons.svg#chevron"/></svg>
-    <input id="project-name" aria-label="Project name" name="project-name" autocomplete="off" spellcheck="false">
+    <input id="collection-name" aria-label="Project name" name="collection-name" autocomplete="off" spellcheck="false">
+    <svg class="icon" aria-hidden="true"><use href="./icons.svg#chevron"/></svg>
+    <input id="project-name" aria-label="Figure name" name="figure-name" autocomplete="off" spellcheck="false">
   </div>
   <div class="spacer"></div>
   <button id="return-to-editor" class="quiet" hidden>Back to editor<svg class="icon" aria-hidden="true"><use href="./icons.svg#arrow"/></svg></button>
@@ -31,7 +34,8 @@
     <button id="file-menu" class="quiet" popovertarget="file-actions">File</button>
     <div id="file-actions" class="popover" popover>
       <button id="new">New project</button>
-      <button id="open">Open project…</button>
+      <button id="open">Open figure…</button>
+      <button id="move-figure">Move figure to project…</button>
       <button id="save-as">Save as…</button>
       <button id="share-copy">Save shareable copy…</button>
       <button id="project-folder">Show workspace in Finder</button>
@@ -40,15 +44,24 @@
     <button id="export" class="primary"><svg class="icon" aria-hidden="true"><use href="./icons.svg#export"/></svg>Export</button>
   </div>
 </header>
+<nav id="figure-strip" aria-label="Open figures" hidden>
+  <div id="figure-tabs" role="tablist" aria-label="Figure tabs"></div>
+  <button id="new-figure" class="icon-button quiet" aria-label="New figure in this project" title="New figure in this project">
+    <svg class="icon" aria-hidden="true"><use href="./icons.svg#plus"/></svg>
+  </button>
+  <button id="project-figures" class="quiet" popovertarget="figure-actions">Figures</button>
+  <div id="figure-actions" class="popover" popover aria-label="Figures in this project"></div>
+</nav>
+</div>
 <main id="home" class="home" tabindex="-1" aria-labelledby="home-title">
   <div class="home-content">
     <div class="home-heading">
       <div>
         <h1 id="home-title">Projects</h1>
-        <p>Your figures and drafts on this Mac.</p>
+        <p>Open a figure in a project to continue editing.</p>
       </div>
       <div class="home-actions">
-        <button id="home-open" disabled><svg class="icon" aria-hidden="true"><use href="./icons.svg#folder"/></svg>Open file</button>
+        <button id="home-open" disabled><svg class="icon" aria-hidden="true"><use href="./icons.svg#folder"/></svg>Open figure</button>
         <button id="home-new" class="primary" disabled><svg class="icon" aria-hidden="true"><use href="./icons.svg#plus"/></svg>New project</button>
       </div>
     </div>
@@ -144,9 +157,17 @@
     <div class="dialog-actions"><button type="button" id="cancel-input">Cancel</button><button type="submit" class="primary"></button></div>
   </form>
 </dialog>
+<dialog id="move-figure-dialog" aria-labelledby="move-figure-title">
+  <form id="move-figure-form">
+    <h2 id="move-figure-title">Move figure to project</h2>
+    <label class="field">Project<select id="move-figure-target" required></select></label>
+    <p id="move-figure-error" class="form-error" role="status" hidden></p>
+    <div class="dialog-actions"><button type="button" id="cancel-move-figure">Cancel</button><button type="submit" class="primary">Move figure</button></div>
+  </form>
+</dialog>
 <dialog id="save-dialog" aria-labelledby="save-title">
   <form id="save-form">
-    <h2 id="save-title">Save project</h2>
+    <h2 id="save-title">Save figure</h2>
     <div class="path-picker">
       <label class="field">Project path<input id="bundle-path" name="project-path" required placeholder="/path/to/figure.plate" autocomplete="off" spellcheck="false"></label>
       <button id="browse-bundle" type="button" hidden>Choose…</button>

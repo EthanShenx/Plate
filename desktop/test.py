@@ -27,9 +27,12 @@ def main():
         fixture = directory / "Fixture.plate"
         shutil.copyfile(ROOT / "examples/nature-double.plate", fixture)
         build(bundle, smoke=True)
-        subprocess.run([bundle / "Contents/MacOS/Plate"], check=True, timeout=210 + args.soak_seconds,
-                       env={**os.environ, "PLATE_SMOKE_SUPPORT": str(directory / "Support"),
-                            "PLATE_SMOKE_FIXTURE": str(fixture), "PLATE_SMOKE_SOAK": str(args.soak_seconds)})
+        executable = bundle / "Contents/MacOS/Plate"
+        environment = {**os.environ, "PLATE_SMOKE_SUPPORT": str(directory / "Support"),
+                       "PLATE_SMOKE_FIXTURE": str(fixture), "PLATE_SMOKE_SOAK": str(args.soak_seconds)}
+        subprocess.run([executable], check=True, timeout=55, env=environment)
+        subprocess.run([executable], check=True, timeout=210 + args.soak_seconds,
+                       env={**environment, "PLATE_SMOKE_RESTORE": "1"})
         with ZipFile(directory / "Saved.plate") as saved:
             assert "provenance.json" in saved.namelist()
         with ZipFile(directory / "Shared.plate") as shared:

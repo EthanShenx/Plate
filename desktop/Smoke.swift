@@ -14,15 +14,38 @@ extension PlateApp {
     }
 
     func beginSmokeWhenReady() {
-        guard !smokeStarted, let fixture = ProcessInfo.processInfo.environment["PLATE_SMOKE_FIXTURE"] else { return }
+        let environment = ProcessInfo.processInfo.environment
+        guard !smokeStarted, let fixture = environment["PLATE_SMOKE_FIXTURE"] else { return }
         smokeStarted = true
         Task {
             do {
-                try await smoke(URL(fileURLWithPath: fixture))
-                print("Desktop smoke test passed")
+                if environment["PLATE_SMOKE_RESTORE"] == "1" {
+                    try await verifyRestoredWorkspace()
+                    print("Quit saved the pending script and relaunch restored its tab")
+                    fflush(stdout)
+                    try await smokeFigure(URL(fileURLWithPath: fixture))
+                    print("Desktop smoke test passed")
+                } else {
+                    try await smokeTabs()
+                    print("Created, switched, closed, and reopened figure tabs")
+                }
                 fflush(stdout)
                 NSApp.terminate(nil)
             } catch { smokeFail(error.localizedDescription) }
+        }
+    }
+
+    private func verifyRestoredWorkspace() async throws {
+        try await waitFor("the restored tabs and script") {
+            try await js("""
+                const state = await fetch("/api/project").then(r => r.json());
+                const active = document.querySelector('#figure-tabs [aria-selected="true"]');
+                return !document.querySelector("#workspace").hidden &&
+                    document.querySelectorAll('#figure-tabs [role="tab"]').length === 2 &&
+                    active?.dataset.figure === state.workspace_id &&
+                    state.project.name === "Figure 2" &&
+                    state.project.panels[0]?.script.includes("# quit-autosave test");
+                """) as? Bool == true
         }
     }
 
@@ -52,8 +75,8 @@ extension PlateApp {
         }
     }
 
-    private func smoke(_ fixture: URL) async throws {
-        guard let url = webView.url, let window = webView.window else {
+    private func smokeTabs() async throws {
+        guard let url = webView.url else {
             throw SmokeError(message: "The workspace did not appear.")
         }
         let session = URLSession(configuration: .ephemeral)
@@ -108,6 +131,63 @@ extension PlateApp {
             try await js("return document.querySelector('#measure').textContent === '122 × 183 mm'") as? Bool == true
         }
 
+        _ = try await js("document.querySelector('#new-figure').click()")
+        try await waitFor("two tabs in the same project") {
+            try await js("""
+                const state = await fetch("/api/project").then(r => r.json());
+                return state.library.projects.length === 1 &&
+                    state.library.projects[0].figures.length === 2 &&
+                    document.querySelectorAll('#figure-tabs [role="tab"]').length === 2 &&
+                    document.querySelector("#project-name").value === "Figure 2";
+                """) as? Bool == true
+        }
+        _ = try await js("document.querySelector('#figure-tabs [role=tab]').click()")
+        try await waitFor("the first figure and its saved panel") {
+            try await js("""
+                return document.querySelector("#project-name").value === "Figure 1" &&
+                    document.querySelectorAll("#frame .tile").length === 1;
+                """) as? Bool == true
+        }
+        _ = try await js("""
+            document.querySelector('[aria-label="Close tab for Figure 2"]').click();
+            """)
+        try await waitFor("the second tab to close") {
+            try await js("return document.querySelectorAll('#figure-tabs [role=tab]').length === 1") as? Bool == true
+        }
+        _ = try await js("""
+            document.querySelector("#project-figures").click();
+            [...document.querySelectorAll("#figure-actions button")]
+                .find(button => button.textContent === "Figure 2").click();
+            """)
+        try await waitFor("the closed figure to reopen") {
+            try await js("return document.querySelector('#project-name').value === 'Figure 2'") as? Bool == true
+        }
+        _ = try await js("""
+            document.querySelector("#empty-add").click();
+            [...document.querySelectorAll("#panel-types button")]
+                .find(button => button.textContent === "Python").click();
+            """)
+        try await waitFor("the script panel") {
+            try await js("return !!document.querySelector('#edit-script')") as? Bool == true
+        }
+        let unsaved = try await js("""
+            document.querySelector("#edit-script").click();
+            const input = document.querySelector("#script-editor .cm-content");
+            input.focus();
+            const text = new DataTransfer();
+            text.setData("text/plain", "# quit-autosave test\\n");
+            input.dispatchEvent(new ClipboardEvent("paste", {
+                bubbles: true, cancelable: true, clipboardData: text
+            }));
+            return document.querySelector("#editor-status").textContent === "Unsaved edits";
+            """)
+        try require(unsaved as? Bool == true, "Could not prepare an unsaved script edit before quitting.")
+    }
+
+    private func smokeFigure(_ fixture: URL) async throws {
+        guard let url = webView.url, let window = webView.window else {
+            throw SmokeError(message: "The workspace did not appear.")
+        }
         try menu("File", "Open…")
         try await waitFor("the native Open panel") { window.attachedSheet is NSOpenPanel }
         (window.attachedSheet as? NSOpenPanel)?.cancel(nil)

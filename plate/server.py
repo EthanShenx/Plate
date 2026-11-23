@@ -28,6 +28,7 @@ from .bundle import (
 from .checks import project_checks
 from .grid import apply_grid, as_grid, fit_artboard, is_grid, validate_panel_groups
 from .layout import Layout
+from .library import FigureLibrary
 from .model import Project, SCRIPT_EXTENSIONS, new_id, project_from_dict, presets
 from .export import FORMATS, compose_pdf, rasterize
 from .native import native_signature, render_native
@@ -615,6 +616,9 @@ class Session:
             return self.update(data)
         if endpoint == "/api/new":
             self.__init__(workspaces=self.workspaces)
+            if data.get("name"):
+                self.project.name = data["name"]
+                write_workspace(self.project, self.workspace)
             self.remember_workspace()
         elif endpoint in {"/api/open", "/api/resume"}:
             if endpoint == "/api/open":
@@ -703,11 +707,17 @@ class Handler(BaseHTTPRequestHandler):
         url = urlsplit(self.path)
         path = url.path
         if path.startswith("/preview/"):
-            key = path.removeprefix("/preview/")
-            if len(key) != 64 or not SAFE_ID.fullmatch(key):
+            parts = path.removeprefix("/preview/").split("/")
+            key = parts[-1]
+            if (len(parts) not in (1, 2) or len(key) != 64 or not SAFE_ID.fullmatch(key)
+                    or (len(parts) == 2 and not SAFE_ID.fullmatch(parts[0]))):
                 self.send_error(404)
                 return
-            workspace = self.server.session.workspace
+            session = self.server.session
+            workspace = session.workspaces / parts[0] if len(parts) == 2 else session.workspace
+            if workspace.is_symlink():
+                self.send_error(404)
+                return
             preview = workspace / "cache" / f"{key}.png"
             variants = {f"dpi={dpi}": dpi for dpi in PREVIEW_DPI[1:]}
             if url.query in variants:
@@ -733,6 +743,7 @@ class Handler(BaseHTTPRequestHandler):
                 rects = Layout(session.project).rects
                 self.json({
                     "id": session.project.id,
+                    "workspace_id": session.workspace.name,
                     "scripts": {panel.id: panel.script for panel in session.project.panels
                                 if panel.type in SCRIPT_EXTENSIONS},
                     "stale_inputs": [
@@ -744,9 +755,10 @@ class Handler(BaseHTTPRequestHandler):
             with self.server.session.lock:
                 session = self.server.session
                 sync_scripts(session.project, session.workspace)
-                self.json(session.state())
+                self.json(self.server.workbench_state())
         elif path == "/api/projects":
-            self.json(project_library(self.server.session.workspaces))
+            with self.server.session.lock:
+                self.json(self.server.library_state())
         elif path == "/api/presets":
             self.json(presets())
         else:
@@ -769,7 +781,10 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("Invalid request size.")
             data = json.loads(self.rfile.read(size))
             with self.server.session.lock:
-                result = self.server.session.action(urlsplit(self.path).path, data)
+                workspace = self.headers.get("X-Plate-Workspace")
+                if workspace and workspace != self.server.session.workspace.name:
+                    raise ValueError("This figure is no longer active. Reopen its tab before editing.")
+                result = self.server.act(urlsplit(self.path).path, data)
             self.json(result)
         except IncompleteExport as error:
             self.json({"error": str(error), "export_issues": error.issues}, 409)
@@ -782,6 +797,61 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class PlateServer(ThreadingHTTPServer):
+    def library_state(self):
+        figures = project_library(self.session.workspaces)
+        for figure in figures:
+            self.library.include(figure["id"], figure["name"])
+        return self.library.view(figures)
+
+    def workbench_state(self):
+        return {**self.session.state(), "library": self.library_state()}
+
+    def act(self, endpoint, data):
+        session, library = self.session, self.library
+        active = session.workspace.name
+        if endpoint in {"/api/new", "/api/new-figure", "/api/open", "/api/resume"}:
+            project_id = data.get("project")
+            if project_id is not None and project_id not in library.projects:
+                raise ValueError("Choose an existing project.")
+            if endpoint in {"/api/new", "/api/new-figure"}:
+                members = library.projects[project_id]["figures"] if project_id else []
+                names = {item["name"] for item in project_library(session.workspaces) if item["id"] in members}
+                index = 1
+                while f"Figure {index}" in names:
+                    index += 1
+                data = {"name": f"Figure {index}"}
+            if endpoint == "/api/open":
+                path = str(Path(data["path"]).expanduser().resolve())
+                existing = next((item["id"] for item in project_library(session.workspaces)
+                                 if item["bundle"] == path), None)
+                if existing:
+                    endpoint, data = "/api/resume", {"workspace": existing}
+            if endpoint != "/api/resume" or data["workspace"] != active:
+                session.action("/api/new" if endpoint == "/api/new-figure" else endpoint, data)
+            figure = session.workspace.name
+            if not library.project_for(figure):
+                name = session.project.name if endpoint in {"/api/open", "/api/resume"} else library.untitled_name()
+                library.include(figure, name, project_id)
+            library.activate(figure)
+        elif endpoint == "/api/close-tab":
+            figure = data["workspace"]
+            if figure == library.active and figure in library.tabs and len(library.tabs) > 1:
+                index = library.tabs.index(figure)
+                next_tab = library.tabs[index + 1] if index + 1 < len(library.tabs) else library.tabs[index - 1]
+                session.action("/api/resume", {"workspace": next_tab})
+            library.close(figure)
+        elif endpoint == "/api/rename-project":
+            name = data["name"].strip()
+            if not name:
+                raise ValueError("Enter a project name.")
+            library.projects[library.project_for(active)]["name"] = name
+        elif endpoint == "/api/move-figure":
+            library.move(active, data["project"])
+        else:
+            return session.action(endpoint, data)
+        library.save()
+        return self.workbench_state()
+
     def server_close(self):
         if hasattr(self, "watcher"):
             self.watcher.close()
@@ -793,16 +863,34 @@ def make_server(bundle=None, workspaces=WORKSPACES, *, desktop_token=""):
     server = PlateServer(("127.0.0.1", 0), Handler)
     server.desktop_token = desktop_token.encode()
     try:
-        if desktop_token and not bundle:
-            workspaces.mkdir(parents=True, exist_ok=True)
-            for record in project_library(workspaces):
+        workspaces.mkdir(parents=True, exist_ok=True)
+        library = server.library = FigureLibrary(workspaces)
+        figures = project_library(workspaces)
+        for figure in figures:
+            library.include(figure["id"], figure["name"])
+        valid = {figure["id"] for figure in figures}
+        library.tabs = [key for key in library.tabs if key in valid]
+        if library.active not in library.tabs:
+            library.active = next(iter(library.tabs), None)
+        if not bundle:
+            candidates = [library.active] if library.active else []
+            candidates.extend(key for key in library.tabs if key != library.active)
+            if not library.initialized and desktop_token:
+                candidates.extend(figure["id"] for figure in figures)
+            for key in candidates:
                 try:
-                    server.session = Session(workspaces=workspaces, workspace=workspaces / record["id"])
+                    server.session = Session(workspaces=workspaces, workspace=workspaces / key)
                     break
                 except (ValueError, KeyError, TypeError, OSError):
-                    logging.getLogger("plate").info("Could not resume workspace %s", record["id"])
+                    logging.getLogger("plate").info("Could not resume workspace %s", key)
+                    library.close(key)
         if not hasattr(server, "session"):
             server.session = Session(bundle, workspaces)
+        if server.session.registered_workspace:
+            figure = server.session.workspace.name
+            library.include(figure, server.session.project.name)
+            library.activate(figure)
+            library.save()
         server.session.initialize_native_panels()
         if not desktop_token:
             server.watcher = Watcher(server.session)
