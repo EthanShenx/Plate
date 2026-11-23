@@ -75,6 +75,29 @@ extension PlateApp {
         }
     }
 
+    private func verifyTabScrolling() async throws {
+        _ = try await js("document.querySelector('#figure-tabs').style.maxWidth = '125px'")
+        for (position, left, right) in [(0.0, false, true), (0.5, true, true), (1.0, true, false)] {
+            _ = try await js("""
+                const tabs = document.querySelector("#figure-tabs");
+                tabs.scrollLeft = position * (tabs.scrollWidth - tabs.clientWidth);
+                """, ["position": position])
+            try await waitFor("the tab fades at scroll position \(position)") {
+                try await js("""
+                    const tabs = document.querySelector("#figure-tabs");
+                    return tabs.hasAttribute("data-fade-left") === left &&
+                        tabs.hasAttribute("data-fade-right") === right &&
+                        getComputedStyle(tabs).maskImage !== "none" &&
+                        tabs.offsetHeight === tabs.clientHeight;
+                    """, ["left": left, "right": right]) as? Bool == true
+            }
+        }
+        _ = try await js("document.querySelector('#figure-tabs').style.removeProperty('max-width')")
+        try await waitFor("the unmasked tab strip after widening") {
+            try await js("return getComputedStyle(document.querySelector('#figure-tabs')).maskImage === 'none'") as? Bool == true
+        }
+    }
+
     private func smokeTabs() async throws {
         guard let url = webView.url else {
             throw SmokeError(message: "The workspace did not appear.")
@@ -141,6 +164,7 @@ extension PlateApp {
                     document.querySelector("#project-name").value === "Figure 2";
                 """) as? Bool == true
         }
+        try await verifyTabScrolling()
         _ = try await js("document.querySelector('#figure-tabs [role=tab]').click()")
         try await waitFor("the first figure and its saved panel") {
             try await js("""

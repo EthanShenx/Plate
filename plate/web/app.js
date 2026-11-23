@@ -1764,6 +1764,31 @@ function currentProject() {
   return library.projects.find(project => project.figures.some(figure => figure.id === library.active));
 }
 
+const figureTabs = $("#figure-tabs");
+
+function updateFigureTabEdges() {
+  const maxScroll = figureTabs.scrollWidth - figureTabs.clientWidth;
+  const left = figureTabs.scrollLeft;
+  figureTabs.toggleAttribute("data-fade-left", maxScroll > 1 && left > 1);
+  figureTabs.toggleAttribute("data-fade-right", maxScroll > 1 && maxScroll - left > 1);
+}
+
+function revealFigureTab(tab) {
+  tab?.parentElement.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+
+figureTabs.addEventListener("scroll", updateFigureTabEdges, { passive: true });
+new ResizeObserver(updateFigureTabEdges).observe(figureTabs);
+document.fonts.ready.then(updateFigureTabEdges);
+figureTabs.addEventListener("wheel", event => {
+  const mode = event.deltaMode;
+  if (event.deltaX || !event.deltaY || event.ctrlKey || event.shiftKey) return;
+  const before = figureTabs.scrollLeft;
+  const step = mode === 1 ? 16 : mode === 2 ? figureTabs.clientWidth : 1;
+  figureTabs.scrollLeft += event.deltaY * step;
+  if (figureTabs.scrollLeft !== before) event.preventDefault();
+}, { passive: false });
+
 function drawFigureTabs() {
   const figures = new Map(library.projects.flatMap(project => project.figures.map(figure => [figure.id, { figure, project }])));
   const current = currentProject();
@@ -1779,10 +1804,9 @@ function drawFigureTabs() {
   $("#new-figure").disabled = !current;
   $("#project-figures").disabled = !current;
   $("#move-figure").disabled = library.projects.length < 2;
-  const tabs = $("#figure-tabs");
-  const focus = tabs.contains(document.activeElement) ? document.activeElement.dataset.figure : null;
-  const scroll = tabs.scrollLeft;
-  tabs.replaceChildren(...library.tabs.flatMap(id => {
+  const focus = figureTabs.contains(document.activeElement) ? document.activeElement.dataset.figure : null;
+  const scroll = figureTabs.scrollLeft;
+  figureTabs.replaceChildren(...library.tabs.flatMap(id => {
     const entry = figures.get(id);
     if (!entry) return [];
     const { figure: item, project } = entry;
@@ -1798,7 +1822,7 @@ function drawFigureTabs() {
     tab.title = `${project.name} / ${item.name}`;
     if (active) $("#workspace").setAttribute("aria-labelledby", tab.id);
     const close = button("", () => switchFigure("close-tab", { workspace: id }));
-    close.className = "icon-button quiet";
+    close.className = "figure-tab-close";
     close.setAttribute("aria-label", "Close tab for " + label);
     close.append(icon("close"));
     const wrapper = document.createElement("div");
@@ -1807,7 +1831,8 @@ function drawFigureTabs() {
     wrapper.append(tab, close);
     return [wrapper];
   }));
-  tabs.scrollLeft = scroll;
+  figureTabs.scrollLeft = scroll;
+  updateFigureTabEdges();
   if (focus) document.getElementById("figure-tab-" + focus)?.focus({ preventScroll: true });
   $("#figure-actions").replaceChildren(...(current?.figures || []).map(item =>
     button(item.name, () => {
@@ -1816,8 +1841,8 @@ function drawFigureTabs() {
     })));
 }
 
-$("#figure-tabs").onkeydown = event => {
-  const tabs = [...$("#figure-tabs").querySelectorAll('[role="tab"]')];
+figureTabs.onkeydown = event => {
+  const tabs = [...figureTabs.querySelectorAll('[role="tab"]')];
   const index = tabs.indexOf(event.target);
   const next = {
     ArrowLeft: (index + tabs.length - 1) % tabs.length, ArrowRight: (index + 1) % tabs.length,
@@ -1825,7 +1850,8 @@ $("#figure-tabs").onkeydown = event => {
   }[event.key];
   if (index < 0 || next === undefined) return;
   event.preventDefault();
-  tabs[next].focus();
+  tabs[next].focus({ preventScroll: true });
+  revealFigureTab(tabs[next]);
 };
 
 async function flushFigure() {
@@ -1841,7 +1867,7 @@ async function switchFigure(name, data = {}) {
   if (!state || switchingFigure || panelGesture) return false;
   switchingFigure = true;
   try {
-    const focusTab = $("#figure-tabs").contains(document.activeElement);
+    const focusTab = figureTabs.contains(document.activeElement);
     if (!await flushFigure()) return false;
     const previous = state.workspace_id;
     if (!$("#workspace").hidden) {
@@ -1875,7 +1901,7 @@ async function switchFigure(name, data = {}) {
     const view = figureViews.get(state.workspace_id);
     if (view && previous !== state.workspace_id) viewport.scrollTo(view.scrollLeft, view.scrollTop);
     const tab = document.getElementById("figure-tab-" + library.active);
-    tab?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    if (previous !== state.workspace_id || focusTab) revealFigureTab(tab);
     if (focusTab) tab?.focus({ preventScroll: true });
     scheduleRefresh();
     findInterpreters();
@@ -2597,6 +2623,7 @@ try {
   if (library.active) showEditor(false);
   else showHome(false);
   draw();
+  revealFigureTab(figureTabs.querySelector('[aria-selected="true"]'));
   scheduleRefresh();
   findInterpreters();
   queuePoll();

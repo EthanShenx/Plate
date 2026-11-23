@@ -112,14 +112,53 @@ button.brand:enabled:hover { background: var(--hover); border-color: transparent
 #collection-name:hover, #project-name:hover { border-color: var(--control-line); }
 #collection-name:focus, #project-name:focus { background: var(--paper); }
 #figure-strip {
-  display: flex; align-items: center; gap: 4px; padding: 4px 14px;
-  background: var(--sidebar); border-bottom: 1px solid var(--line);
+  display: flex; align-items: center; gap: 4px; padding: 3px 10px 0;
+  background: linear-gradient(var(--line), var(--line)) bottom / 100% 1px no-repeat,
+    color-mix(in srgb, var(--surface), var(--ink) 6%);
 }
-#figure-tabs { display: flex; gap: 4px; min-width: 0; overflow-x: auto; padding: 2px; }
-.figure-tab { display: flex; align-items: center; flex: 0 0 auto; max-width: 250px; border: 1px solid transparent; border-radius: var(--control-radius); }
-.figure-tab:has([aria-selected="true"]) { background: var(--paper); border-color: var(--control-line); }
-.figure-tab [role="tab"] { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.figure-tab .icon-button { flex: 0 0 28px; width: 28px; }
+#figure-tabs {
+  --tab-fade-width: min(18px, 20%);
+  display: flex; min-width: 0; overflow-x: auto; scrollbar-width: none;
+  scroll-padding-inline: var(--tab-fade-width); overscroll-behavior-x: contain;
+}
+#figure-tabs::-webkit-scrollbar { display: none; }
+#figure-tabs[data-fade-left] { --tab-fade-left: var(--tab-fade-width); }
+#figure-tabs[data-fade-right] { --tab-fade-right: var(--tab-fade-width); }
+#figure-tabs:is([data-fade-left], [data-fade-right]) {
+  mask-image: linear-gradient(to right, transparent, #000 var(--tab-fade-left, 0px),
+    #000 calc(100% - var(--tab-fade-right, 0px)), transparent);
+}
+.figure-tab {
+  position: relative; display: flex; align-items: center; flex: none;
+  min-width: 112px; max-width: 216px; height: 32px; padding-inline-end: 3px;
+  border-radius: 7px 7px 0 0; color: var(--muted);
+}
+.figure-tab:has([aria-selected="true"]) { background: var(--surface); color: var(--ink); }
+.figure-tab:not(:has([aria-selected="true"])):hover { background: var(--hover); color: var(--ink); }
+.figure-tab:not(:has([aria-selected="true"]), :hover) + .figure-tab:not(:has([aria-selected="true"]), :hover)::before {
+  content: ""; position: absolute; inset-block: 9px; inset-inline-start: 0;
+  width: 1px; background: var(--control-line); opacity: .65; pointer-events: none;
+}
+.figure-tab button[role="tab"] {
+  flex: 1; align-self: stretch; min-width: 0; min-height: 0;
+  padding: 0 4px 0 11px; border: 0; border-radius: inherit; background: transparent;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: start; font-size: 13px;
+}
+.figure-tab [aria-selected="true"] { font-weight: 600; }
+.figure-tab [role="tab"]:focus-visible { outline-offset: -2px; }
+.figure-tab button.figure-tab-close {
+  flex: 0 0 26px; width: 26px; height: 26px; min-height: 0;
+  padding: 0; border: 0; border-radius: 50%; background: transparent;
+}
+.figure-tab .figure-tab-close:enabled:hover { background: var(--active); color: var(--ink); }
+.figure-tab-close .icon { width: 13px; height: 13px; }
+.figure-tab-close:focus-visible { outline-offset: -2px; }
+#figure-strip > button { flex: none; min-height: 28px; font-size: 13px; }
+#figure-strip > .icon-button { width: 28px; }
+#project-figures { margin-inline-start: auto; padding-block: 3px; }
+@media (prefers-reduced-motion: no-preference) {
+  .figure-tab, .figure-tab-close { transition: background-color 120ms ease-out, color 120ms ease-out; }
+}
 #figure-actions { max-height: min(50vh, 360px); overflow-y: auto; }
 .project-list .project-figures-list { padding-inline-start: 28px; }
 .project-summary { padding: 12px 8px; cursor: pointer; font-weight: 550; }
@@ -440,7 +479,7 @@ dialog p { margin-bottom: 12px; }
 .dialog-actions { display: flex; justify-content: end; gap: 8px; margin-top: 16px; }
 .path-picker { display: flex; gap: 6px; align-items: end; }
 .path-picker > .field { flex: 1; min-width: 0; }
-[data-desktop] :is(.toolbar, .stage-bar, .panel-row, .stage, .inspector-tabs) { user-select: none; -webkit-user-select: none; }
+[data-desktop] :is(.toolbar, #figure-strip, .stage-bar, .panel-row, .stage, .inspector-tabs) { user-select: none; -webkit-user-select: none; }
 [data-desktop] :is(input, textarea, [contenteditable], pre) { user-select: text; -webkit-user-select: text; }
 [data-desktop][data-appearance="dark"] {
   color-scheme: dark;
