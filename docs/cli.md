@@ -15,6 +15,26 @@ Each command prints one JSON object with `ok`. Successful commands return the pr
 
 Use `--force` with build, apply or export to rerun scripts even when their cached renders match. Inspect reads the saved bundle and reports recorded render environments without running panel scripts. Use `inspect --compare-environment` to compare recorded interpreter, package, and font information with local installations. Use `--data-root /path/to/data` with inspect or export to use a local data folder for that invocation.
 
+## Build a project with several figures
+
+Create a JSON manifest with a project name and the figure spec paths in tab order. Resolve figure spec paths from the manifest’s folder. Each spec resolves its scripts, assets, and data paths as usual.
+
+```json
+{
+  "name": "Study figures",
+  "figures": ["figures/results.json", "figures/methods.json"]
+}
+```
+
+```sh
+.venv/bin/python -m plate project build study.json --output study.plateproject
+open -a Plate study.plateproject
+```
+
+You can also open the file from **File → Open…** in Plate or run `make run BUNDLE=study.plateproject` for the browser. Plate creates a named project in its library, opens the figures in the listed order, and selects the first figure. Reopening the same archive resumes the imported project and its local edits. Each new build imports as a separate project. Save a figure as `.plate` to keep an editable copy outside the library.
+
+The archive includes the plot scripts, imported artwork, render previews, and data files listed in `input_files`. It uses the recipient’s Python and R interpreters when rerendering. The command prints JSON with per-figure checks and identifies the failing spec if a build fails. Plate writes the archive only after all figures render successfully.
+
 ## Figure specification
 
 Coordinates use millimetres from the upper left of the artboard. The order of panels establishes their stacking order. Script, asset and data paths are relative to the specification file. Panel scripts and imported images or vectors are stored in the bundle. When you apply a patch to a shareable copy, Plate keeps using its bundled data unless you specify a different data root.

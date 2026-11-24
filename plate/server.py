@@ -18,7 +18,7 @@ from tempfile import TemporaryDirectory
 from threading import Lock, RLock
 from time import time
 from urllib.parse import urlsplit
-from zipfile import BadZipFile
+from zipfile import BadZipFile, ZipFile
 
 from .alignment import dependency_signature, fixed_axes, participating, validate_groups
 from .bundle import (
@@ -34,6 +34,7 @@ from .export import FORMATS, compose_pdf, rasterize
 from .native import native_signature, render_native
 from .fonts import label_metrics
 from .interpreters import discovery, interpreter, probe
+from .project_bundle import PROJECT_SUFFIX, read_project_bundle
 from .provenance import compare_environment, read_provenance, render_environment
 from .render import (
     PREVIEW_DPI, data_directory, input_fingerprints, make_preview, prepare_script, render_script,
@@ -161,6 +162,14 @@ class Session:
             "data_root_override": self.data_root_override,
         })
         self.registered_workspace = True
+
+    def use_workspace(self, loaded):
+        # The watcher and HTTP handlers keep the original session and lock.
+        self.project, self.workspace, self.bundle = loaded.project, loaded.workspace, loaded.bundle
+        self.renders, self.keep_cache = loaded.renders, loaded.keep_cache
+        self.provenance, self.data_root_override = loaded.provenance, loaded.data_root_override
+        self.saved_digest = loaded.saved_digest
+        self.registered_workspace = loaded.registered_workspace
 
     def render_state(self, panel, rect, rects=None):
         if not has_render_source(panel):
@@ -633,11 +642,7 @@ class Session:
                 loaded = Session(workspaces=self.workspaces, workspace=workspace)
                 loaded.remember_workspace()
             loaded.initialize_native_panels()
-            self.project, self.workspace, self.bundle = loaded.project, loaded.workspace, loaded.bundle
-            self.renders, self.keep_cache = loaded.renders, loaded.keep_cache
-            self.provenance, self.data_root_override = loaded.provenance, loaded.data_root_override
-            self.saved_digest = loaded.saved_digest
-            self.registered_workspace = loaded.registered_workspace
+            self.use_workspace(loaded)
         elif endpoint == "/api/save":
             self.save(data.get("path"), cache=data.get("cache", False))
         else:
@@ -806,10 +811,67 @@ class PlateServer(ThreadingHTTPServer):
     def workbench_state(self):
         return {**self.session.state(), "library": self.library_state()}
 
+    def open_project(self, path):
+        workspaces = self.session.workspaces
+        with ZipFile(path) as archive:
+            project_id, name, entries = read_project_bundle(archive)
+            previous = self.library.projects.get(project_id)
+            if previous:
+                available = {figure["id"] for figure in project_library(workspaces)}
+                figures = [figure for figure in previous["figures"] if figure in available]
+                if figures:
+                    return self.activate_project(project_id, previous["name"], figures)
+
+            with TemporaryDirectory(prefix="plate-import-", dir=workspaces) as scratch, ExitStack() as rollback:
+                staging = Path(scratch)
+                bundle = staging / "figure.plate"
+                prepared = []
+                for entry in entries:
+                    with archive.open(entry) as source, bundle.open("wb") as destination:
+                        shutil.copyfileobj(source, destination)
+                    loaded = Session(bundle, staging / "workspaces")
+                    if not loaded.project.embedded_data or loaded.project.data_root:
+                        raise ValueError("Figures in a Plate project must use embedded data.")
+                    loaded.bundle = loaded.saved_digest = None
+                    loaded.remember_workspace()
+                    loaded.state()
+                    prepared.append(loaded.workspace)
+
+                figures = []
+                for workspace in prepared:
+                    destination = workspaces / new_id()
+                    workspace.rename(destination)
+                    rollback.callback(shutil.rmtree, destination, ignore_errors=True)
+                    figures.append(destination.name)
+                result = self.activate_project(project_id, name, figures)
+                rollback.pop_all()
+                return result
+
+    def activate_project(self, project_id, name, figures):
+        active = self.session.workspace.name
+        if active not in figures:
+            active = figures[0]
+        loaded = Session(workspaces=self.session.workspaces, workspace=self.session.workspaces / active)
+        loaded.initialize_native_panels()
+        state = loaded.state()
+        catalog = project_library(loaded.workspaces)
+        if not set(figures).issubset(figure["id"] for figure in catalog):
+            raise ValueError("A figure in this project is unavailable.")
+        self.library.open_project(project_id, name, figures, active)
+        self.session.use_workspace(loaded)
+        return {**state, "library": self.library.view(catalog)}
+
     def act(self, endpoint, data):
         session, library = self.session, self.library
         active = session.workspace.name
         if endpoint in {"/api/new", "/api/new-figure", "/api/open", "/api/resume"}:
+            if endpoint == "/api/open":
+                path = Path(data["path"]).expanduser().resolve()
+                if path.suffix.lower() == PROJECT_SUFFIX:
+                    try:
+                        return self.open_project(path)
+                    except RuntimeError as error:
+                        raise ValueError(f"Could not open Plate project: {error}") from error
             project_id = data.get("project")
             if project_id is not None and project_id not in library.projects:
                 raise ValueError("Choose an existing project.")
@@ -821,9 +883,8 @@ class PlateServer(ThreadingHTTPServer):
                     index += 1
                 data = {"name": f"Figure {index}"}
             if endpoint == "/api/open":
-                path = str(Path(data["path"]).expanduser().resolve())
                 existing = next((item["id"] for item in project_library(session.workspaces)
-                                 if item["bundle"] == path), None)
+                                 if item["bundle"] == str(path)), None)
                 if existing:
                     endpoint, data = "/api/resume", {"workspace": existing}
             if endpoint != "/api/resume" or data["workspace"] != active:
@@ -862,6 +923,7 @@ class PlateServer(ThreadingHTTPServer):
 def make_server(bundle=None, workspaces=WORKSPACES, *, desktop_token=""):
     server = PlateServer(("127.0.0.1", 0), Handler)
     server.desktop_token = desktop_token.encode()
+    project_bundle = bundle and Path(bundle).suffix.lower() == PROJECT_SUFFIX
     try:
         workspaces.mkdir(parents=True, exist_ok=True)
         library = server.library = FigureLibrary(workspaces)
@@ -885,8 +947,10 @@ def make_server(bundle=None, workspaces=WORKSPACES, *, desktop_token=""):
                     logging.getLogger("plate").info("Could not resume workspace %s", key)
                     library.close(key)
         if not hasattr(server, "session"):
-            server.session = Session(bundle, workspaces)
-        if server.session.registered_workspace:
+            server.session = Session(None if project_bundle else bundle, workspaces)
+        if project_bundle:
+            server.open_project(Path(bundle).expanduser().resolve())
+        elif server.session.registered_workspace:
             figure = server.session.workspace.name
             library.include(figure, server.session.project.name)
             library.activate(figure)

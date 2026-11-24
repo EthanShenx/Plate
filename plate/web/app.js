@@ -2441,7 +2441,7 @@ async function openProject() {
     if (path) await openPath(path);
     return;
   }
-  askValue("Open figure", "Path to a .plate file", "Open", openPath);
+  askValue("Open figure or project", "Path to a .plate or .plateproject file", "Open", openPath);
 }
 
 $("#home-button").onclick = () => showHome();

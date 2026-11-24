@@ -53,6 +53,18 @@ class FigureLibrary:
             self.tabs.append(figure)
         self.active = figure
 
+    def open_project(self, project_id, name, figures, active):
+        previous = self.projects, self.tabs, self.active
+        self.projects = {**self.projects, project_id: {"name": name, "figures": figures}}
+        members = set(figures)
+        self.tabs = [figure for figure in self.tabs if figure not in members] + figures
+        self.active = active
+        try:
+            self.save()
+        except OSError:
+            self.projects, self.tabs, self.active = previous
+            raise
+
     def close(self, figure):
         if figure not in self.tabs:
             return

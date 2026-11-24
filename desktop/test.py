@@ -26,6 +26,13 @@ def main():
         bundle = directory / "Smoke.app"
         fixture = directory / "Fixture.plate"
         shutil.copyfile(ROOT / "examples/nature-double.plate", fixture)
+        for name in ("Results", "Methods"):
+            (directory / f"{name}.json").write_text(json.dumps({"name": name}))
+        manifest = directory / "Study.json"
+        manifest.write_text(json.dumps({"name": "Study", "figures": ["Results.json", "Methods.json"]}))
+        subprocess.run([sys.executable, "-m", "plate", "project", "build", str(manifest),
+                        "--output", str(manifest.with_suffix(".plateproject"))],
+                       cwd=ROOT, check=True, capture_output=True)
         build(bundle, smoke=True)
         executable = bundle / "Contents/MacOS/Plate"
         environment = {**os.environ, "PLATE_SMOKE_SUPPORT": str(directory / "Support"),

@@ -60,6 +60,8 @@ Open a project and click **+** in the top tab bar to add a figure. Each figure h
 
 Plate saves edits to its local workspace as you work. On macOS, **⌘Q** saves pending edits before quitting. Reopen Plate to pick up where you left off, with the same tabs and active figure. Use **Save** when you want a `.plate` file for an individual figure.
 
+Use a JSON manifest to build a `.plateproject` file from several figure specs, then open it in Plate to edit the figures as tabs. [Build a project from the command line](docs/cli.md#build-a-project-with-several-figures)
+
 ## Share a figure
 
 Choose **File → Save shareable copy…** and send the resulting `.plate` file. The recipient opens it in Plate and can edit the layout, scripts, and styles. Imported artwork and the data files and helpers listed under each script panel’s **Source → Render inputs** travel with the copy. Use paths relative to the data folder in both your scripts and the input list.

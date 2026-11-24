@@ -83,6 +83,8 @@ def build(destination, smoke):
         resources.mkdir(parents=True)
         executable.parent.mkdir()
 
+        documents = [("org.platesci.figure", "Plate Figure", "plate"),
+                     ("org.platesci.project", "Plate Project", "plateproject")]
         plist = {
             "CFBundleName": "Plate", "CFBundleDisplayName": "Plate",
             "CFBundleIdentifier": identifier, "CFBundlePackageType": "APPL",
@@ -92,15 +94,15 @@ def build(destination, smoke):
             "NSSupportsAutomaticGraphicsSwitching": True,
             "PlatePython": str(stable_python()), "PlatePlotPython": sys.executable,
             "CFBundleDocumentTypes": [{
-                "CFBundleTypeName": "Plate Figure", "CFBundleTypeRole": "Editor",
-                "LSHandlerRank": "Owner", "LSItemContentTypes": ["org.platesci.figure"],
-            }],
+                "CFBundleTypeName": label, "CFBundleTypeRole": "Editor",
+                "LSHandlerRank": "Owner", "LSItemContentTypes": [identifier],
+            } for identifier, label, _ in documents],
             "UTExportedTypeDeclarations": [{
-                "UTTypeIdentifier": "org.platesci.figure", "UTTypeDescription": "Plate Figure",
+                "UTTypeIdentifier": identifier, "UTTypeDescription": label,
                 "UTTypeConformsTo": ["public.data"], "UTTypeTagSpecification": {
-                    "public.filename-extension": ["plate"],
+                    "public.filename-extension": [suffix],
                 },
-            }],
+            } for identifier, label, suffix in documents],
         }
         with (contents / "Info.plist").open("wb") as stream:
             plistlib.dump(plist, stream)

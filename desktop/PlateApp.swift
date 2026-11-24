@@ -33,6 +33,7 @@ final class PlateApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavig
     var smokeStarted = false
     #endif
     private let plateType = UTType(exportedAs: "org.platesci.figure", conformingTo: .data)
+    private let plateProjectType = UTType(exportedAs: "org.platesci.project", conformingTo: .data)
 
     var supportDirectory: URL {
         #if PLATE_SMOKE
@@ -224,7 +225,7 @@ final class PlateApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavig
             open.canChooseFiles = kind != "chooseFolder"
             open.canChooseDirectories = kind == "chooseFolder"
             switch kind {
-            case "openProject": open.allowedContentTypes = [plateType]
+            case "openProject": open.allowedContentTypes = [plateType, plateProjectType]
             case "openVector": open.allowedContentTypes = [.pdf, .svg]
             case "openRaster": open.allowedContentTypes = [.png, .jpeg, .tiff, .webP]
             default: break
@@ -287,7 +288,8 @@ final class PlateApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavig
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
-        if let url = urls.first(where: { $0.isFileURL && $0.pathExtension.lowercased() == "plate" }) {
+        let extensions = ["plate", "plateproject"]
+        if let url = urls.first(where: { $0.isFileURL && extensions.contains($0.pathExtension.lowercased()) }) {
             openFile(url)
         }
     }

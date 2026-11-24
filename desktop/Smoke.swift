@@ -214,7 +214,12 @@ extension PlateApp {
         }
         try menu("File", "Open…")
         try await waitFor("the native Open panel") { window.attachedSheet is NSOpenPanel }
-        (window.attachedSheet as? NSOpenPanel)?.cancel(nil)
+        guard let picker = window.attachedSheet as? NSOpenPanel else {
+            throw SmokeError(message: "The file picker did not open.")
+        }
+        try require(picker.allowedContentTypes.contains { $0.identifier == "org.platesci.project" },
+                    "Open does not accept Plate project files.")
+        picker.cancel(nil)
         try await waitFor("the file picker to close") { window.attachedSheet == nil }
         let rejected = try await js("""
             try { await window.webkit.messageHandlers.plate.postMessage({kind: "arbitraryCommand"}); }
@@ -225,6 +230,19 @@ extension PlateApp {
         _ = try await js("location.assign('https://example.invalid/plate')")
         try await Task.sleep(nanoseconds: 350_000_000)
         try require(webView.url == url, "The WebView left the private origin.")
+
+        let project = fixture.deletingLastPathComponent().appendingPathComponent("Study.plateproject")
+        application(NSApp, open: [project])
+        try await waitFor("the imported project and its ordered tabs") {
+            try await js("""
+                const tabs = [...document.querySelectorAll('#figure-tabs [role="tab"]')];
+                return document.querySelector("#collection-name").value === "Study" &&
+                    tabs.slice(-2).map(tab => tab.textContent).join(",") === "Results,Methods" &&
+                    tabs.at(-2).getAttribute("aria-selected") === "true";
+                """) as? Bool == true
+        }
+        print("Native Open imported both project figures in order")
+        fflush(stdout)
 
         application(NSApp, open: [fixture])
         try await waitFor("both plotting runtimes and all six previews", seconds: 125) {

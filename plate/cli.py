@@ -9,15 +9,17 @@ import subprocess
 from tempfile import TemporaryDirectory
 from zipfile import BadZipFile
 
-from .bundle import import_asset
+from .bundle import declared_data_files, import_asset
 from .export import DPIS, FORMATS
 from .model import SCRIPT_EXTENSIONS, project_from_dict
+from .project_bundle import PROJECT_SUFFIX, save_project_bundle
 from .render import data_directory
 from .server import IncompleteExport, Session
 
-COMMANDS = ("build", "apply", "inspect", "export")
+COMMANDS = ("build", "apply", "inspect", "export", "project")
 SPEC_FIELDS = {"name", "size", "style", "palettes", "groups", "alignment", "interpreters",
                "timeout_s", "grid_mm", "data_root", "panels", "remove_panels"}
+COMMAND_ERRORS = (OSError, ValueError, TypeError, LookupError, RuntimeError, BadZipFile, subprocess.SubprocessError)
 
 
 def relative_to(folder, value):
@@ -121,8 +123,51 @@ def summary(state):
     }
 
 
+def build_project(options, workspaces):
+    output = options.output.expanduser().resolve()
+    manifest_path = options.spec.resolve()
+    if output.suffix.lower() != PROJECT_SUFFIX:
+        raise ValueError(f"The project output path must end in {PROJECT_SUFFIX}.")
+    if output == manifest_path:
+        raise ValueError("Choose an output path different from the project manifest.")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict) or manifest.keys() != {"name", "figures"}:
+        raise ValueError("A project manifest needs a name and an ordered list of figure specifications.")
+    name, figures = manifest["name"], manifest["figures"]
+    if (not isinstance(name, str) or not name.strip() or not isinstance(figures, list) or not figures
+            or any(not isinstance(spec, str) or not spec.strip() for spec in figures)):
+        raise ValueError("Provide a project name and at least one path to a figure specification.")
+
+    bundles, results = [], []
+    for index, source in enumerate(figures, start=1):
+        try:
+            spec = relative_to(manifest_path.parent, source)
+            bundle = workspaces.parent / f"figure-{index}.plate"
+            if output == spec:
+                raise ValueError("Choose an output path different from the input specifications.")
+            session = Session(workspaces=workspaces)
+            update_project(session, spec, output)
+            inputs = declared_data_files(session.project, session.data_folder(), required=True)
+            if output in inputs.values():
+                raise ValueError("Choose an output path different from the render inputs.")
+            session.refresh_pending()
+            result = summary(session.state())
+            result.pop("bundle")
+            if any(panel["state"] in {"stale", "error"} for panel in result["panels"]):
+                return {"ok": False, "error": "Some panels could not render.", "figure": source, **result}
+            session.share(bundle, cache=True)
+            bundles.append(bundle)
+            results.append({"spec": source, **result})
+        except COMMAND_ERRORS as error:
+            return {"ok": False, "error": str(error), "figure": source}
+    save_project_bundle(output, name.strip(), bundles)
+    return {"ok": True, "project": str(output), "name": name.strip(), "figures": results}
+
+
 def execute(options, workspaces):
     command = options.command
+    if command == "project":
+        return build_project(options, workspaces)
     if command == "export":
         format = options.output.suffix.lower().lstrip(".")
         if format not in FORMATS:
@@ -176,6 +221,11 @@ def main(argv):
     export.add_argument("--output", required=True, type=Path)
     export.add_argument("--dpi", type=int, choices=DPIS, default=300)
     export.add_argument("--draft", action="store_true", help="Allow previous or missing artwork and list affected panels.")
+    project = commands.add_parser("project", help="Build a portable project with multiple figures.")
+    project_commands = project.add_subparsers(dest="project_command", required=True)
+    project_build = project_commands.add_parser("build", help="Build an ordered project from a JSON manifest.")
+    project_build.add_argument("spec", type=Path)
+    project_build.add_argument("--output", required=True, type=Path)
     for command in (build, apply, export):
         command.add_argument("--force", action="store_true", help="Rerun scripts even when their cached renders match.")
     for command in (inspect, export):
@@ -188,7 +238,7 @@ def main(argv):
     try:
         with TemporaryDirectory(prefix="plate-cli-") as scratch:
             result = execute(options, Path(scratch) / "workspaces")
-    except (OSError, ValueError, TypeError, LookupError, RuntimeError, BadZipFile, subprocess.SubprocessError) as error:
+    except COMMAND_ERRORS as error:
         result = {"ok": False, "error": str(error)}
     print(json.dumps(result, ensure_ascii=False, allow_nan=False))
     return 0 if result["ok"] else 1
